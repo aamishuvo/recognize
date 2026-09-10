@@ -34,15 +34,36 @@
    * ==================================================================== */
   var SELECTORS = {
     // Primary production selector. Nothing else is ever clicked.
+    // data-method="post" is what makes this an ADD; the delete variant below
+    // would REMOVE an existing like, which must never happen.
     UNLIKED:
       'a.approval_link.unapproved[data-category="recognition"][data-event="liked"][data-method="post"]',
-    // Already-liked state, counted but never clicked.
+    // Already liked BY THE CURRENT USER. Counted, never clicked: clicking this
+    // issues the DELETE and would take the user's own like away.
     LIKED:
-      'a.approval_link.approved[data-category="recognition"][data-event="liked"]',
+      'a.approval_link.approved[data-category="recognition"][data-event="liked"][data-method="delete"]',
     // Any recognition approval link, either state (diagnostics + verification).
     ANY:
       'a.approval_link[data-category="recognition"][data-event="liked"]'
   };
+
+  /*
+   * NOTE ON THE VISIBLE NUMBER (+1, +4, +5 ...):
+   * that is the TOTAL approval count from all users. It says nothing about
+   * whether the current user has liked the recognition — an unliked post can
+   * read "+4" and a liked one "+5". This engine therefore never reads the
+   * link's text content for any decision. Grep the file: there is no
+   * textContent/innerText read anywhere outside the control panel's own UI.
+   * The class + data-method pair is the only state signal.
+   */
+
+  // Deliberately BROAD "this is already liked" test, used for the never-click
+  // guard and for counting. Either signal alone is enough to refuse a click:
+  // we would rather skip an ambiguous element than delete someone's approval.
+  function looksApproved(el) {
+    if (!el) return false;
+    return el.classList.contains('approved') || el.getAttribute('data-method') === 'delete';
+  }
 
   // /banglalink.net/recognitions/rglauokd/approvals?approvers_limit=5
   //                              ^^^^^^^^ recognition id
@@ -201,11 +222,19 @@
   function isSafeUnlikedTarget(el) {
     if (!el || !el.isConnected) return { ok: false, reason: 'detached' };
     if (el.tagName !== 'A') return { ok: false, reason: 'not-an-anchor' };
-    if (!el.matches(SELECTORS.UNLIKED)) return { ok: false, reason: 'selector-mismatch' };
-    if (el.classList.contains('approved')) return { ok: false, reason: 'already-approved' };
+    if (!el.classList.contains('approval_link')) return { ok: false, reason: 'not-an-approval-link' };
+
+    // --- the two conditions that prevent destroying an existing like ---
+    if (looksApproved(el)) return { ok: false, reason: 'already-approved-NEVER-CLICK' };
+    if (el.getAttribute('data-method') === 'delete') return { ok: false, reason: 'delete-method-NEVER-CLICK' };
+
+    if (!el.classList.contains('unapproved')) return { ok: false, reason: 'not-unapproved' };
     if (el.getAttribute('data-method') !== 'post') return { ok: false, reason: 'not-post-method' };
     if (el.getAttribute('data-category') !== 'recognition') return { ok: false, reason: 'not-recognition-category' };
     if (el.getAttribute('data-event') !== 'liked') return { ok: false, reason: 'not-liked-event' };
+    // Belt and braces: the composed selector must agree with the checks above.
+    if (!el.matches(SELECTORS.UNLIKED)) return { ok: false, reason: 'selector-mismatch' };
+
     var id = recognitionIdOf(el);
     if (!id) return { ok: false, reason: 'no-recognition-id-in-href' };
     if (!SAFE_ID_RE.test(id)) return { ok: false, reason: 'unsafe-recognition-id' };
@@ -358,18 +387,31 @@
   /* ======================================================================
    * CLICK + VERIFY
    * ==================================================================== */
+  /**
+   * Confirms the exact expected transition for THIS recognition:
+   *   .unapproved + data-method="post"  ->  .approved + data-method="delete"
+   * Returns true (confirmed), false (still unapproved), or null (unknown —
+   * the element is gone and we cannot prove anything either way).
+   */
   function isApprovedNow(id, previousEl) {
     var el = findApprovalById(id);
     if (!el) {
-      // Element vanished entirely (feed re-render / removal). If the node we
-      // clicked is gone and nothing unapproved replaced it, treat as unknown.
-      if (previousEl && previousEl.isConnected && previousEl.classList.contains('approved')) return true;
-      return null; // unknown
+      if (previousEl && previousEl.isConnected && previousEl.matches(SELECTORS.LIKED)) return true;
+      return null; // vanished — never re-click on an unknown
     }
-    if (el.classList.contains('approved')) return true;
-    if (el.classList.contains('unapproved')) return false;
-    // Neither class: no longer matches the unliked selector => treat as done.
-    return !el.matches(SELECTORS.UNLIKED);
+    // Both halves required: the approved class AND the delete method.
+    if (el.matches(SELECTORS.LIKED)) return true;
+    // Still offering to POST => the like did not register yet.
+    if (el.matches(SELECTORS.UNLIKED)) return false;
+    // Half-transitioned (e.g. class swapped before the method). Not yet
+    // confirmed, but definitely not something to click again.
+    return false;
+  }
+
+  /** The approval id the server hands back: /approvals/<approval_id> */
+  function approvalIdOf(el) {
+    var m = (el && (el.getAttribute('href') || '')).match(/\/approvals\/(\d+)/);
+    return m ? m[1] : null;
   }
 
   function verifyApproved(id, clickedEl) {
@@ -382,10 +424,18 @@
     })();
   }
 
+  /**
+   * The single place in this file that dispatches a click. The safety gate is
+   * re-run here with ZERO gap before el.click(), so no await, timer, retry or
+   * future refactor can insert work between the check and the click.
+   * Throws rather than clicking anything it cannot fully verify.
+   */
   function performClick(el) {
+    var gate = isSafeUnlikedTarget(el);
+    if (!gate.ok) throw new Error('refused to click: ' + gate.reason);
     // Rails UJS (data-remote="true" + data-method="post") listens for a plain
-    // click on the anchor. el.click() dispatches a trusted-shaped, bubbling
-    // MouseEvent, which is exactly what the app's own handler expects.
+    // click on the anchor. el.click() dispatches a bubbling MouseEvent, which
+    // is exactly what the app's own handler expects.
     el.click();
   }
 
@@ -419,7 +469,8 @@
     var el = findApprovalById(id);
     if (!el) { stats.skipped++; processed.add(id); return Promise.resolve('skipped'); }
 
-    if (el.matches(SELECTORS.LIKED)) {
+    if (looksApproved(el)) {
+      // Already liked by the current user. Clicking would DELETE that like.
       stats.alreadyLiked++;
       processed.add(id);
       return Promise.resolve('already');
@@ -449,7 +500,8 @@
         processed.add(id);
         return 'skipped';
       }
-      if (fresh.matches(SELECTORS.LIKED)) {
+      if (looksApproved(fresh)) {
+        // It became liked during our delay (another tab, a slow round-trip).
         stats.alreadyLiked++;
         processed.add(id);
         return 'already';
@@ -476,7 +528,10 @@
           if (ok === true) {
             stats.liked++;
             processed.add(id);
-            log('Liked ' + id + ' (' + stats.liked + '/' + config.maxLikes + ')');
+            var approvalId = approvalIdOf(findApprovalById(id));
+            log('Liked ' + id + ' -> approved/delete' +
+                (approvalId ? ' (approval ' + approvalId + ')' : '') +
+                ' [' + stats.liked + '/' + config.maxLikes + ']');
             return 'liked';
           }
           if (ok === null) {
@@ -518,8 +573,10 @@
       if (!id) return;
       if (!seen.has(id)) { seen.add(id); stats.detected++; }
       if (processed.has(id)) return;
-      if (a.matches(SELECTORS.UNLIKED)) unlikedIds.push(id);
-      else if (a.matches(SELECTORS.LIKED)) likedIds.push(id);
+      // Broad check first: anything that looks approved is liked and off-limits,
+      // even if only one of the two signals is present.
+      if (looksApproved(a)) likedIds.push(id);
+      else if (a.matches(SELECTORS.UNLIKED)) unlikedIds.push(id);
     });
 
     // Count already-liked recognitions once each, then never revisit them.
@@ -655,8 +712,9 @@
 
     try {
       console.group('[RecognizeAutoLiker] DIAGNOSTIC (no clicks performed)');
-      console.log('Unliked recognitions: ' + report.unlikedCount);
-      console.log('Liked recognitions:   ' + report.likedCount);
+      console.log('Unliked recognitions (clickable):        ' + report.unlikedCount);
+      console.log('Liked by you (approved+delete, SKIPPED):  ' + report.likedCount);
+      console.log('NOTE: the +N text is the total from all users and is never used.');
       console.log('Feed scroll container:', container);
       console.log('Container description: ' + report.scrollContainerDescription);
       console.log('Current scroll height: ' + report.scrollHeight);

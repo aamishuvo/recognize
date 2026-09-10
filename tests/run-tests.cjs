@@ -72,10 +72,20 @@ const mockState = (page) => page.evaluate(() => ({
   clicks: window.__mock.clicks,
   totalClicks: window.__mock.totalClicks,
   forbiddenClicks: window.__mock.forbiddenClicks,
+  unlikedByAutomation: window.__mock.unlikedByAutomation,
+  approvedIds: window.__mock.approvedIds,
   batchesLoaded: window.__mock.batchesLoaded,
   unlikedLeft: window.__mock.unlikedCount(),
   likedNow: window.__mock.likedCount()
 }));
+
+/** The one failure that must never happen: an existing like was removed. */
+function assertNoLikesRemoved(m) {
+  eq(m.unlikedByAutomation.length, 0,
+    'NO existing like was ever removed (removed: ' + JSON.stringify(m.unlikedByAutomation) + ')');
+  eq(m.forbiddenClicks.length, 0,
+    'no approved/decoy control was clicked: ' + JSON.stringify(m.forbiddenClicks));
+}
 
 /** Fast timings so the suite runs in seconds while keeping every code path. */
 const FAST = { baseDelay: 150, maxNoNewContentAttempts: 3, verbose: false };
@@ -94,7 +104,18 @@ test('1. Clicks unliked recognitions and verifies the state flips', async () => 
   eq(res.stats.failed, 0, 'no failures');
   eq(res.stats.detected, 6, 'six recognitions detected');
   eq(m.unlikedLeft, 0, 'no unliked approval links remain in the DOM');
-  eq(m.likedNow, 6, 'all six now render the approved state');
+  eq(m.likedNow, 6, 'all six now render approved + data-method="delete"');
+  assertNoLikesRemoved(m);
+
+  // The exact documented transition, per recognition we clicked.
+  const after = await page.evaluate(() => window.__mock.snapshot());
+  for (const id of Object.keys(m.clicks)) {
+    assert(after[id].cls.includes('approved') && !after[id].cls.includes('unapproved'),
+      id + ' carries .approved and no longer .unapproved');
+    eq(after[id].method, 'delete', id + ' flipped data-method post -> delete');
+    assert(/\/approvals\/\d+/.test(after[id].href),
+      id + ' href gained the approval id: ' + after[id].href);
+  }
   await page.close();
 });
 
@@ -106,7 +127,7 @@ test('2. Never clicks an already-approved recognition or any decoy control', asy
   const res = await runToCompletion(page, { ...FAST });
   const m = await mockState(page);
 
-  eq(m.forbiddenClicks.length, 0, 'zero forbidden clicks: ' + JSON.stringify(m.forbiddenClicks));
+  assertNoLikesRemoved(m);
   const clickedIds = Object.keys(m.clicks);
   for (const href of before) {
     const id = href.match(/\/recognitions\/([^/]+)\/approvals/)[1];
@@ -297,6 +318,75 @@ test('12. Safety: hidden controls are not clicked and the scroll container is th
     !!document.querySelector('li[data-hidden-case] a.approval_link.unapproved'));
   assert(hiddenStillUnliked, 'the display:none recognition was never clicked');
   assert(res.reason === 'END_OF_FEED', 'still terminated cleanly despite an unreachable card: ' + res.reason);
+  await page.close();
+});
+
+test('13. Day-to-day idempotency: a second run never touches an existing like', async () => {
+  const page = await openFeed({ cards: 12, pages: 0, likedEvery: 3, slow: 50 });
+
+  // ---- Day 1: 8 unliked get liked, 4 were already liked ----
+  const day1 = await runToCompletion(page, { ...FAST });
+  eq(day1.stats.liked, 8, 'day 1 liked the 8 unliked recognitions');
+  eq(day1.stats.alreadyLiked, 4, 'day 1 skipped the 4 already-liked ones');
+  const clicksAfterDay1 = (await mockState(page)).totalClicks;
+  const stateAfterDay1 = await page.evaluate(() => window.__mock.snapshot());
+  eq(Object.keys(stateAfterDay1).length, 12, 'all 12 recognitions present');
+  eq(Object.values(stateAfterDay1).every((v) => v.method === 'delete'), true,
+    'every recognition is now in the approved/delete state');
+
+  // ---- Day 2: same feed, everything already approved ----
+  const day2 = await runToCompletion(page, { ...FAST });
+  const m = await mockState(page);
+  const stateAfterDay2 = await page.evaluate(() => window.__mock.snapshot());
+
+  eq(day2.stats.liked, 0, 'day 2 liked nothing');
+  eq(day2.stats.alreadyLiked, 12, 'day 2 saw all 12 as already liked');
+  eq(day2.stats.failed, 0, 'day 2 recorded no failures');
+  eq(m.totalClicks, clicksAfterDay1, 'day 2 dispatched ZERO clicks');
+  assertNoLikesRemoved(m);
+  eq(JSON.stringify(stateAfterDay2), JSON.stringify(stateAfterDay1),
+    'the feed is byte-for-byte unchanged after day 2 (approval ids intact)');
+  eq(m.likedNow, 12, 'all 12 approvals survived the second run');
+  await page.close();
+});
+
+test('14. The +N total is never used as the current user\'s liked state', async () => {
+  const page = await openFeed({ cards: 12, pages: 0, likedEvery: 3, slow: 50 });
+  const before = await page.evaluate(() => window.__mock.snapshot());
+
+  // The fixture is built so the count actively misleads:
+  eq(before['rgl00005'].text, '+7', 'rgl00005 is UNLIKED but shows a high +7');
+  eq(before['rgl00003'].text, '+2', 'rgl00003 is LIKED but shows a low +2');
+  eq(before['rgl0000b'].text, '+1', 'rgl0000b shows +1 yet is UNLIKED by this user');
+  eq(before['rgl00008'].text, '+',  'rgl00008 shows a bare + (zero total)');
+  // Same visible text, opposite required actions:
+  eq(before['rgl00004'].text, '+4', 'rgl00004 shows +4 and is UNLIKED');
+  eq(before['rgl00009'].text, '+4', 'rgl00009 shows the same +4 but IS LIKED');
+  eq(before['rgl00004'].method, 'post', 'rgl00004 offers post');
+  eq(before['rgl00009'].method, 'delete', 'rgl00009 offers delete');
+
+  const res = await runToCompletion(page, { ...FAST });
+  const m = await mockState(page);
+  const after = await page.evaluate(() => window.__mock.snapshot());
+
+  assertNoLikesRemoved(m);
+  eq(res.stats.liked, 8, 'all 8 unliked recognitions were liked regardless of their counts');
+
+  // High count but unliked -> clicked.
+  eq(m.clicks['rgl00005'], 1, 'the "+7" unliked recognition was clicked');
+  eq(after['rgl00005'].text, '+8', 'its total went 7 -> 8');
+  // Text "+1" but unliked -> clicked.
+  eq(m.clicks['rgl0000b'], 1, 'the "+1" unliked recognition was clicked');
+  // Zero total -> clicked.
+  eq(m.clicks['rgl00008'], 1, 'the "+" (no likes yet) recognition was clicked');
+  // Low count but already liked -> untouched.
+  assert(!m.clicks['rgl00003'], 'the "+2" already-liked recognition was NOT clicked');
+  eq(after['rgl00003'].href, before['rgl00003'].href, 'its approval id is unchanged');
+  eq(after['rgl00003'].text, '+2', 'its total is unchanged');
+  // Identical "+4" text, opposite outcomes.
+  eq(m.clicks['rgl00004'], 1, 'the unliked "+4" was clicked');
+  assert(!m.clicks['rgl00009'], 'the liked "+4" was NOT clicked');
+  eq(after['rgl00009'].href, before['rgl00009'].href, 'the liked "+4" approval id is unchanged');
   await page.close();
 });
 

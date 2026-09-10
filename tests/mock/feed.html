@@ -88,10 +88,13 @@
     clicks: {},              // recognitionId -> click count
     forbiddenClicks: [],     // anything we must never have clicked
     approvedIds: [],
+    unlikedByAutomation: [], // CATASTROPHIC: an existing like was removed
     order: [],               // ids in click order
     batchesLoaded: 0,
     totalClicks: 0
   };
+  var counts = {};           // recognitionId -> TOTAL approvals from all users
+  var approvalIds = {};      // recognitionId -> server-assigned approval id
   window.__mock = mock;
 
   function idFor(i) {
@@ -102,6 +105,11 @@
   function makeCard(i) {
     var id = idFor(i);
     var startsLiked = CFG.likedEvery > 0 && (i % CFG.likedEvery === 0);
+    // Total approvals from OTHER users, deterministic per card. This is what
+    // the +N text shows, and it is uncorrelated with the current user's state:
+    // an unliked card may read "+7" and a liked one "+1".
+    counts[id] = (i * 3) % 8;
+    if (startsLiked) counts[id] += 1;  // the current user's own like is in the total
     var behavior = CFG.failIds.indexOf(id) >= 0 ? 'fail'
                  : CFG.vanishIds.indexOf(id) >= 0 ? 'vanish' : 'normal';
 
@@ -123,34 +131,39 @@
       '</div>';
 
     li.querySelector('.vote').appendChild(startsLiked ? likedAnchor(id) : unlikedAnchor(id));
+    if (startsLiked) mock.approvedIds.push(id);
     return li;
   }
 
+  // Renders "+N" where N is the TOTAL from all users (or "+" when nobody has
+  // liked it yet) — exactly like the real app. data-sender is populated even
+  // when the current user has NOT liked it, so it is not a state signal either.
   function unlikedAnchor(id) {
     var a = document.createElement('a');
     a.className = 'approval_link unapproved btn';
-    a.setAttribute('data-sender', '');
+    a.setAttribute('data-sender', 'ANayan@banglalink.net');
     a.setAttribute('data-category', 'recognition');
     a.setAttribute('data-event', 'liked');
     a.setAttribute('data-remote', 'true');
     a.setAttribute('rel', 'nofollow');
     a.setAttribute('data-method', 'post');
     a.setAttribute('href', '/banglalink.net/recognitions/' + id + '/approvals?approvers_limit=5');
-    a.textContent = '+';
+    a.textContent = counts[id] > 0 ? '+' + counts[id] : '+';
     return a;
   }
 
   function likedAnchor(id) {
     var a = document.createElement('a');
     a.className = 'approval_link approved';
-    a.setAttribute('data-sender', 'app@recognizeapp.com');
+    a.setAttribute('data-sender', 'ANayan@banglalink.net');
     a.setAttribute('data-category', 'recognition');
     a.setAttribute('data-event', 'liked');
     a.setAttribute('data-remote', 'true');
     a.setAttribute('rel', 'nofollow');
     a.setAttribute('data-method', 'delete');
-    a.setAttribute('href', '/banglalink.net/recognitions/' + id + '/approvals/' + (approvalSeq++) + '?approvers_limit=5');
-    a.textContent = '+1';
+    if (!approvalIds[id]) approvalIds[id] = String(approvalSeq++);
+    a.setAttribute('href', '/banglalink.net/recognitions/' + id + '/approvals/' + approvalIds[id] + '?approvers_limit=5');
+    a.textContent = '+' + counts[id];
     return a;
   }
 
@@ -181,13 +194,26 @@
       return;
     }
 
+    var m = (a.getAttribute('href') || '').match(/\/recognitions\/([A-Za-z0-9_-]+)\/approvals/);
+    var id = m ? m[1] : null;
+
+    // Clicking an approved control issues the DELETE and REALLY REMOVES the
+    // current user's like — modelled faithfully so any regression causes
+    // observable damage, not just a logged complaint.
     if (a.getAttribute('data-method') === 'delete' || a.classList.contains('approved')) {
       mock.forbiddenClicks.push({ reason: 'clicked-already-approved', href: a.getAttribute('href') });
+      if (id) {
+        mock.unlikedByAutomation.push(id);
+        counts[id] = Math.max(0, (counts[id] || 1) - 1);
+        delete approvalIds[id];
+        var idx = mock.approvedIds.indexOf(id);
+        if (idx >= 0) mock.approvedIds.splice(idx, 1);
+        var span = a.parentNode;
+        if (span) span.replaceChild(unlikedAnchor(id), a);
+      }
       return;
     }
 
-    var m = (a.getAttribute('href') || '').match(/\/recognitions\/([A-Za-z0-9_-]+)\/approvals/);
-    var id = m ? m[1] : null;
     if (!id) return;
 
     mock.clicks[id] = (mock.clicks[id] || 0) + 1;
@@ -202,6 +228,7 @@
       if (behavior === 'vanish') { if (card) card.remove(); return; } // card removed mid-flight
       var span = a.parentNode;
       if (!span) return;
+      counts[id] = (counts[id] || 0) + 1;                    // total goes 4 -> 5
       span.replaceChild(likedAnchor(id), a);                 // real app replaces the node
       mock.approvedIds.push(id);
     }, CFG.slow);
@@ -239,11 +266,27 @@
     if (el) { el.remove(); return true; }
     return false;
   };
+  // Full state snapshot, so a second run can be proved byte-for-byte identical.
+  mock.snapshot = function () {
+    var out = {};
+    [].forEach.call(document.querySelectorAll('a.approval_link[data-category="recognition"][data-event="liked"]'), function (a) {
+      var mm = (a.getAttribute('href') || '').match(/\/recognitions\/([A-Za-z0-9_-]+)\/approvals/);
+      if (!mm) return;
+      out[mm[1]] = {
+        cls: a.className,
+        method: a.getAttribute('data-method'),
+        href: a.getAttribute('href'),
+        text: a.textContent.trim()
+      };
+    });
+    return out;
+  };
+  mock.countsOf = function () { return JSON.parse(JSON.stringify(counts)); };
   mock.unlikedCount = function () {
     return document.querySelectorAll('a.approval_link.unapproved[data-category="recognition"][data-event="liked"][data-method="post"]').length;
   };
   mock.likedCount = function () {
-    return document.querySelectorAll('a.approval_link.approved[data-category="recognition"][data-event="liked"]').length;
+    return document.querySelectorAll('a.approval_link.approved[data-category="recognition"][data-event="liked"][data-method="delete"]').length;
   };
   mock.ready = true;
 })();

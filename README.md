@@ -67,7 +67,7 @@ work around it.
 | `extension/core.js` | Content script (generated) |
 | `tools/build.cjs` | Regenerates all four outputs from `src/` |
 | `tests/mock/feed.html` | Mock RecognizeApp feed: 20 cards, liked + unliked, decoys, infinite scroll |
-| `tests/run-tests.cjs` | Playwright suite — 12 tests against the mock |
+| `tests/run-tests.cjs` | Playwright suite — 14 tests against the mock |
 | `package.json` | `npm run build` / `npm test` / `npm run mock` |
 
 ---
@@ -209,41 +209,90 @@ __RecognizeAutoLiker__.failedIds();    // recognition ids that would not flip
 
 ---
 
-## 8. Safety model
+## 8. Safety model — this is a "like if not already liked" tool, never a "toggle like" tool
 
-The **only** element ever clicked is one matching, at click time:
+Clicking an **already approved** control issues the `DELETE` and **removes your own
+existing like**. That is the one failure mode that destroys data rather than merely
+doing nothing, so it is guarded structurally, not by convention.
 
-```
-a.approval_link.unapproved[data-category="recognition"][data-event="liked"][data-method="post"]
-```
+### The two states
 
-Before each click the element must additionally pass **all** of:
+| | Class | `data-method` | href | Action |
+| --- | --- | --- | --- | --- |
+| Not liked by you | `approval_link unapproved` | `post` | `/recognitions/<id>/approvals` | **CLICK** |
+| Liked by you | `approval_link approved` | `delete` | `/recognitions/<id>/approvals/<approval_id>` | **NOTHING** |
+
+### The `+N` number is NOT a liked-state signal
+
+The number rendered inside the link (`+1`, `+4`, `+5`) is the **total approvals from all
+users**. It says nothing about whether *you* liked the post — an unliked recognition can
+read `+4`, and a liked one `+5`. The engine therefore **never reads the link's text** for
+any decision. There is no `textContent` / `innerText` read anywhere in
+`src/recognize-auto-liker.js` outside the control panel's own UI rendering; grep it.
+`data-sender` is likewise not a signal — it is populated in both states.
+
+Test 14 pins this down with a fixture built to mislead: two recognitions both showing
+`+4`, one unliked and one liked. The unliked one must be clicked, the liked one must not.
+
+### The hard gate
+
+The **only** element ever clicked is one satisfying, on a **fresh DOM query taken
+immediately before the click**, every one of:
 
 * still attached to the document (`isConnected`)
 * is an `<a>` tag
-* does **not** carry `.approved`
-* `data-method="post"`, `data-category="recognition"`, `data-event="liked"` re-read from attributes
-* `href` matches `/recognitions/<id>/approvals` and `<id>` is `[A-Za-z0-9_-]+`
+* class contains `approval_link`
+* **does not** carry `.approved` and **does not** have `data-method="delete"` ← refuse first
+* class contains `unapproved`
+* `data-method === "post"`
+* `data-category === "recognition"`
+* `data-event === "liked"`
+* the composed selector `SELECTORS.UNLIKED` also matches
+* `href` matches `/recognitions/<id>/approvals` with `<id>` of `[A-Za-z0-9_-]+`
 * visible: non-zero box, not `display:none` / `visibility:hidden` / `opacity:0` / `pointer-events:none`
 * enabled: no `disabled`, no `aria-disabled="true"`, no `.disabled`
 
-The whole gate runs **twice** — once at scan time, once again immediately before the
-click, because the delay in between gives the feed time to change. Visible text such as
-"Like this recognition" is never used as a signal; the DOM state is authoritative.
+If **any** condition fails, or the element cannot be freshly re-verified, it is not clicked.
 
-Comment approvals (`data-category="comment"`), navigation, profile links, recognition
-creation, and already-approved `+1` buttons are all structurally excluded, and the test
-suite asserts zero forbidden clicks against decoys of each kind.
+The gate runs **three** times: at scan time, again after the pre-click delay (the feed can
+change in between), and a third time inside `performClick()` with **zero gap** before
+`el.click()` — so no await, timer, retry or future refactor can slip work between the
+check and the click. `performClick()` throws rather than clicking anything it cannot fully
+verify, and it is the only place in the file that dispatches a click.
+
+Comment approvals (`data-category="comment"`), wrong-event approvals, navigation, profile
+links, recognition creation, and already-approved controls are all structurally excluded.
+
+### The in-memory Set is secondary
+
+The processed-ID `Set` is **duplicate protection only**. It is never the reason something
+gets clicked — the live DOM state is authoritative, and the full gate above runs against a
+fresh query regardless of what the Set says.
 
 ---
 
-## 9. Duplicate protection
+## 9. Idempotency and duplicate protection
+
+Safe to run on the same feed every day. A recognition you liked previously is never
+un-liked by a later run.
 
 * Every recognition ID (parsed from the `href`) is stored in a `Set` once handled.
-* IDs are re-checked before every click, so a card that reappears after scrolling is skipped.
-* After a click, the engine **verifies** the state flipped instead of assuming it did.
-* If it did not flip, it retries **exactly once**, then marks it failed and moves on.
+* Anything that *looks* approved — `.approved` **or** `data-method="delete"`, either
+  signal alone — is counted as already liked and never clicked. An ambiguous or
+  half-rendered element is skipped, not clicked.
+* After a click, the engine **verifies the exact expected transition** rather than
+  assuming: the same recognition must now match
+  `a.approval_link.approved[data-category="recognition"][data-event="liked"][data-method="delete"]`
+  and no longer match the unapproved selector. The `href` gaining `/approvals/<approval_id>`
+  is logged as confirmation.
+* If it did not transition, it retries **exactly once**, then marks it failed and moves on.
   There is no code path that clicks a recognition a third time.
+* If the element vanished and the outcome cannot be proven, it is marked uncertain and
+  skipped — never re-clicked.
+
+Test 13 runs the engine twice over the same feed ("Day 1" / "Day 2") and asserts the
+second run dispatches **zero** clicks and leaves the DOM byte-for-byte identical,
+approval IDs included.
 
 ---
 
@@ -252,7 +301,7 @@ suite asserts zero forbidden clicks against decoys of each kind.
 ```bash
 npm install          # installs Playwright
 npx playwright install chromium
-npm test             # 12 tests, headless
+npm test             # 14 tests, headless
 npm run test:headed  # watch it run
 node tests/run-tests.cjs 4 8   # run individual tests
 ```
@@ -285,6 +334,13 @@ Example: `feed.html?cards=20&pages=3&likedEvery=4&fail=rgl00002`
 | 10 | Respects the maximum-likes limit |
 | 11 | Diagnostic mode reports without clicking anything |
 | 12 | Hidden controls are not clicked; the real scroll container is detected |
+| 13 | Day-to-day idempotency: a second run dispatches zero clicks and removes no like |
+| 14 | The `+N` total is never used as the current user's liked state |
+
+The mock **faithfully models the destructive delete**: clicking an approved control there
+really does remove the like and decrement the count. So a regression causes observable
+damage, and the suite reports exactly which likes were destroyed rather than merely noting
+a rule violation. Every test asserts `unlikedByAutomation` is empty.
 
 ---
 
@@ -330,8 +386,10 @@ wait for the feed to fully render before pressing START.
 * The `href` is the only source of a recognition ID. A tenant that renders approvals
   without `/recognitions/<id>/approvals` in the href will be skipped by the safety gate
   (`no-recognition-id-in-href`) rather than clicked blindly.
-* A "like" is only as confirmed as the DOM. If the app optimistically renders `.approved`
-  before the server responds and the request later fails, the engine counts it as liked.
+* A "like" is only as confirmed as the DOM. If the app optimistically renders
+  `.approved` + `data-method="delete"` before the server responds and the request later
+  fails, the engine counts it as liked. It errs toward *not* clicking, which is the safe
+  direction: the worst case is a missed like, never a deleted one.
 * Server-side rate limiting is not detectable from the DOM. If likes silently stop
   applying, the engine reports `failed` — that is the signal to stop and back off.
 * Console-paste mode does not survive a page refresh (by design).
