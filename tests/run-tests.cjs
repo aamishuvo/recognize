@@ -306,6 +306,83 @@ async function uiChecks(browser) {
   return failed;
 }
 
+/**
+ * The console snippet and bookmarklet are the fallback for machines where
+ * policy blocks unpacked extensions, so they get end-to-end coverage too:
+ * pasted into a real page, exactly as a user would.
+ */
+async function standaloneChecks(browser) {
+  const results = [];
+  let failed = 0;
+  const snippet = fs.readFileSync(path.join(ROOT, 'dist', 'console-snippet.js'), 'utf8');
+  const bookmarklet = fs.readFileSync(path.join(ROOT, 'dist', 'bookmarklet.txt'), 'utf8').trim();
+  const FEED = 'file://' + path.join(ROOT, 'tests', 'mock', 'feed.html');
+  const eq = (a, b, m) => { if (a !== b) throw new Error(`${m} — expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
+
+  async function check(name, fn) {
+    try { await fn(); results.push('  \x1b[32mPASS\x1b[0m  ' + name); }
+    catch (e) { failed++; results.push('  \x1b[31mFAIL\x1b[0m  ' + name + '\n        ' + e.message); }
+  }
+
+  await check('console snippet mounts a panel and likes only unliked recognitions', async () => {
+    const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.goto(FEED);
+    await page.waitForFunction(() => window.mock && window.mock.unlikedCount() > 0);
+
+    await page.evaluate(snippet);            // exactly what a user pastes
+
+    const panel = await page.evaluate(() => {
+      const host = [...document.documentElement.children].find((e) => e.shadowRoot && e.shadowRoot.querySelector('.p'));
+      return host ? [...host.shadowRoot.querySelectorAll('button')].map((b) => b.textContent.trim()) : null;
+    });
+    eq(JSON.stringify(panel), JSON.stringify(['START', 'PAUSE', 'STOP', 'RUN DIAGNOSTIC (no clicks)']), 'panel controls present');
+
+    const diag = await page.evaluate(() => window.__RecognizeAutoLiker__.diagnose());
+    eq(diag.scrollContainer.includes('feed-scroller'), true, 'found the real scroll container');
+
+    const res = await page.evaluate(async () => await window.__RecognizeAutoLiker__.start(
+      { clickDelay: 90, scrollDelay: 110, verifyTimeout: 900, scrollAmount: 240, maxNoNewContentAttempts: 3 }));
+    const after = await page.evaluate(() => ({
+      unliked: window.mock.unlikedCount(), liked: window.mock.likedCount(),
+      clicks: window.mock.totalClicks, forbidden: window.mock.forbiddenClicks,
+      removed: window.mock.unlikedByAutomation
+    }));
+    await page.close();
+
+    eq(after.removed.length, 0, 'NO existing like was removed: ' + JSON.stringify(after.removed));
+    eq(after.forbidden.length, 0, 'no forbidden click: ' + JSON.stringify(after.forbidden));
+    eq(after.unliked, 0, 'nothing left unliked');
+    eq(res.stats.newLikes, after.clicks, 'exactly one click per new like');
+    eq(res.stats.newLikes + res.stats.alreadyLiked, res.stats.scanned, 'every scanned recognition accounted for');
+    eq(after.liked, res.stats.scanned, 'all scanned recognitions end up liked');
+    eq(errors.length, 0, 'no page errors: ' + errors.join('; '));
+  });
+
+  await check('bookmarklet payload mounts', async () => {
+    const page = await browser.newPage();
+    await page.goto(FEED);
+    await page.waitForFunction(() => window.mock);
+    await page.evaluate(decodeURIComponent(bookmarklet.replace(/^javascript:/, '')));
+    const mounted = await page.evaluate(() => !!(window.__RecognizeAutoLiker__ && window.__RecognizeAutoLiker__.__mounted));
+    await page.close();
+    eq(mounted, true, 'the bookmarklet payload runs and mounts');
+  });
+
+  await check('the generated builds match the current engine', async () => {
+    const engine = fs.readFileSync(path.join(ROOT, 'extension', 'content', 'engine.js'), 'utf8');
+    const gate = engine.slice(engine.indexOf('function safetyCheck'), engine.indexOf('function recognitionIdOf'));
+    eq(snippet.includes(gate), true, 'console-snippet.js carries the current safety gate (run: node tools/build.cjs)');
+    const userscript = fs.readFileSync(path.join(ROOT, 'userscript', 'recognize-auto-liker.user.js'), 'utf8');
+    eq(userscript.includes(gate), true, 'the userscript carries the current safety gate (run: node tools/build.cjs)');
+  });
+
+  console.log('\nStandalone fallbacks (console snippet / bookmarklet / userscript)');
+  results.forEach((r) => console.log(r));
+  return failed;
+}
+
 (async () => {
   console.log('\nStatic safety checks');
   const findings = staticChecks();
@@ -323,6 +400,7 @@ async function uiChecks(browser) {
   const out = await page.evaluate(() => window.__testResults);
   await page.close();
   const uiFailed = await uiChecks(browser);
+  const standaloneFailed = await standaloneChecks(browser);
   await browser.close();
 
   console.log('\nBrowser suite (tests/mock/test-runner.html)');
@@ -331,8 +409,9 @@ async function uiChecks(browser) {
     else console.log('  \x1b[31mFAIL\x1b[0m  ' + r.name + '\n        ' + r.error);
   });
 
-  const failed = out.failed + findings.length + uiFailed;
+  const failed = out.failed + findings.length + uiFailed + standaloneFailed;
   console.log('\n' + (out.total - out.failed) + '/' + out.total + ' browser tests passed, ' +
-    findings.length + ' static findings, ' + uiFailed + ' UI wiring failures\n');
+    findings.length + ' static findings, ' + uiFailed + ' UI wiring failures, ' +
+    standaloneFailed + ' standalone failures\n');
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

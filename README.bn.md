@@ -25,6 +25,17 @@ chrome://extensions → Developer mode চালু → Load unpacked → `exten
 
 ### খ) বিকল্প — যদি unpacked এক্সটেনশন ব্লক থাকে
 
+> **`Extension installation is blocked by policy` দেখাচ্ছে?** এটি আপনার অফিসের Chrome
+> পলিসি, এবং এখানকার কিছুই সেটি বাইপাস করার চেষ্টা করে না। নিচের console snippet
+> ব্যবহার করুন — এটি একই ইঞ্জিন, এক্সটেনশন নয়, এবং একই টেস্ট স্যুটে যাচাই করা।
+> কোন পলিসি দায়ী দেখতে `chrome://policy` খুলে `ExtensionInstallBlocklist` /
+> `ExtensionSettings` খুঁজুন।
+>
+> **দ্রুততম পথ:** Recognize ফিড খুলুন → `F12` → **Console** → Chrome চাইলে
+> `allow pasting` লিখে Enter → `dist/console-snippet.js`-এর **পুরোটা** পেস্ট করে Enter।
+> ডানদিকে উপরে একটি কন্ট্রোল প্যানেল আসবে। আগে **RUN DIAGNOSTIC** চাপুন, তারপর
+> *Max new likes* ৩–৫ দিয়ে **START**। থামাতে `Esc`। পেজ রিলোড করলে আবার পেস্ট করতে হবে।
+
 কিছু অফিসের Chrome পলিসি Developer mode বন্ধ রাখে। সেক্ষেত্রে একই ইঞ্জিন এই তিন রূপেও আছে:
 
 | ফাইল | ব্যবহার |

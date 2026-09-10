@@ -25,6 +25,18 @@ privacy, background/minimised behaviour, troubleshooting, limitations.
 
 ### 2. Standalone fallback — when unpacked extensions are blocked
 
+> **Seeing `Extension installation is blocked by policy`?** That is your organisation's
+> Chrome policy, and nothing here tries to override it. Use the console snippet below —
+> it is the same engine, is not an extension, and is covered by the same tests. To see
+> which policy is responsible, open `chrome://policy` and look for
+> `ExtensionInstallBlocklist` / `ExtensionSettings`.
+>
+> **Quickest path:** open your Recognize feed → `F12` → **Console** → type
+> `allow pasting` + Enter if Chrome asks → paste all of `dist/console-snippet.js` →
+> Enter. A control panel appears at the top right. Press **RUN DIAGNOSTIC** first, then
+> set *Max new likes* to 3–5 and press **START**. `Esc` stops it. Re-paste after a page
+> reload.
+
 Some corporate Chrome policies disable Developer mode. The same engine is also built into
 a userscript, a console snippet and a bookmarklet:
 

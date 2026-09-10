@@ -48,12 +48,27 @@ executable, no API key. Download the folder, load it unpacked, done.
 Nothing is installed outside Chrome. No Windows settings, Chrome policies or security
 controls are modified.
 
-> **If your organisation blocks this:** some corporate Chrome policies disable Developer
-> mode or unpacked extensions (`ExtensionInstallBlocklist`, `DeveloperToolsAvailability`,
-> and similar). This extension cannot and does not try to override that — there is no
-> workaround it could legitimately offer. Ask IT, or use the standalone console fallback
-> in the project root (`dist/console-snippet.js`), which is the same engine pasted into
-> DevTools.
+### If Chrome says "Extension installation is blocked by policy"
+
+```
+Failed to load extension
+Error   Extension installation is blocked by policy.
+```
+
+Your organisation's Chrome policy forbids loading extensions. **This extension cannot and
+does not try to override that** — there is no workaround it could legitimately offer, and
+attempting one would be circumventing a control your employer deliberately set.
+
+Two legitimate options:
+
+1. **Use the console fallback instead** — `dist/console-snippet.js` in the project root.
+   It is the same engine, pasted into DevTools on a page you are already logged into, and
+   is not an extension, so extension policy does not apply to it. See the root
+   [`README.md`](../README.md). It is covered by the same test suite.
+2. **Ask IT.** To see exactly which policy is responsible, open **`chrome://policy`** and
+   look for `ExtensionInstallBlocklist`, `ExtensionInstallAllowlist`,
+   `ExtensionSettings` or `BlockExternalExtensions`. If the blocklist is `*` with an
+   allowlist, IT can add this extension's ID; that is their call to make.
 
 ### Updating
 
