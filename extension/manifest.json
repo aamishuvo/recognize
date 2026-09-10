@@ -1,15 +1,49 @@
 {
   "manifest_version": 3,
-  "name": "Recognize Auto Liker (local)",
-  "version": "1.0.0",
-  "description": "Adds a local control panel to RecognizeApp that likes recognition posts you have not liked yet. No login or credential handling.",
+  "name": "Recognize Auto Liker",
+  "version": "2.0.0",
+  "description": "Likes RecognizeApp recognitions you have not liked yet. Never removes an existing like. No login, credential, cookie or token handling.",
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://recognizeapp.com/*",
+    "https://*.recognizeapp.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Recognize Auto Liker",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "content_scripts": [
     {
       "matches": [
-        "https://*.recognizeapp.com/*",
-        "https://recognizeapp.com/*"
+        "https://recognizeapp.com/*",
+        "https://*.recognizeapp.com/*"
       ],
-      "js": ["core.js"],
+      "js": [
+        "content/engine.js",
+        "content/content.js"
+      ],
+      "css": [
+        "content/overlay.css"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }

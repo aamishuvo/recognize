@@ -1,0 +1,35 @@
+:root {
+  --bg: #ffffff; --fg: #1d2433; --muted: #667089; --line: #e2e6ef;
+  --accent: #2f6f4f; --danger: #a03a3a; --chip: #f4f6fa;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #171c27; --fg: #e8ecf5; --muted: #98a2ba; --line: #2c3446;
+          --accent: #3ddc84; --danger: #ff7b7b; --chip: #1f2634; }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 28px 18px; background: var(--bg); color: var(--fg);
+  font: 14px/1.55 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+main { max-width: 640px; margin: 0 auto; }
+h1 { font-size: 19px; margin: 0 0 20px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+section { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+label { display: grid; grid-template-columns: 1fr 110px; gap: 4px 12px; align-items: center; margin-bottom: 14px; }
+label:last-child { margin-bottom: 0; }
+label small { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+label.check { display: flex; gap: 9px; align-items: center; }
+input[type=number] {
+  padding: 5px 8px; text-align: right; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit;
+}
+.explain { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+.explain strong { color: var(--fg); }
+.row { display: flex; gap: 10px; }
+button {
+  padding: 7px 14px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--chip); color: var(--fg); font: inherit; font-weight: 600; cursor: pointer;
+}
+button:hover { filter: brightness(0.97); }
+button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.saved { color: var(--accent); font-weight: 600; }

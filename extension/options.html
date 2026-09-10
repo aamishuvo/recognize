@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="options.css">
+<title>Recognize Auto Liker — Options</title>
+</head>
+<body>
+<main>
+  <h1>Recognize Auto Liker — Options</h1>
+
+  <section>
+    <h2>Scrolling</h2>
+    <label>Scroll amount
+      <input type="number" id="scrollAmount" min="0" step="50">
+      <small>px per step. 0 = scroll 60–75% of the feed height instead.</small>
+    </label>
+    <label>Scroll delay
+      <input type="number" id="scrollDelay" min="200" step="100">
+      <small>ms. Randomised 0.8×–1.67× (1500 → 1200–2500 ms).</small>
+    </label>
+    <label>Stop after no new posts
+      <input type="number" id="maxNoNewContentAttempts" min="1" step="1">
+      <small>consecutive scrolls that load nothing before the run ends.</small>
+    </label>
+  </section>
+
+  <section>
+    <h2>Click timing</h2>
+    <label>Click delay
+      <input type="number" id="clickDelay" min="200" step="100">
+      <small>ms base. Used when the explicit min/max below are blank.</small>
+    </label>
+    <label>Minimum click delay
+      <input type="number" id="minClickDelay" min="0" step="100" placeholder="auto">
+      <small>ms before a click. Blank = derived from click delay (1200 → 800).</small>
+    </label>
+    <label>Maximum click delay
+      <input type="number" id="maxClickDelay" min="0" step="100" placeholder="auto">
+      <small>ms before a click. Blank = derived from click delay (1200 → 1800).</small>
+    </label>
+    <label>Verification timeout
+      <input type="number" id="verifyTimeout" min="500" step="250">
+      <small>ms to wait for unapproved+post → approved+delete before giving up.</small>
+    </label>
+  </section>
+
+  <section>
+    <h2>Limits</h2>
+    <label>Maximum new likes per run
+      <input type="number" id="maxLikesPerRun" min="1" step="1">
+      <small>The run stops once this many new likes are verified.</small>
+    </label>
+    <label>Give up after repeated failures
+      <input type="number" id="historyFailureLimit" min="0" step="1">
+      <small>Skip a recognition that failed verification this many times in past runs. 0 = never skip. This can only ever <em>reduce</em> clicking.</small>
+    </label>
+  </section>
+
+  <section>
+    <h2>Interface</h2>
+    <label class="check"><input type="checkbox" id="showBadge"> Show the on-page status badge with a STOP button</label>
+    <label class="check"><input type="checkbox" id="debug"> Debug logging in the page console</label>
+  </section>
+
+  <section>
+    <h2>Processing history</h2>
+    <p class="explain">
+      History is a list of recognition IDs this extension has already processed. It exists purely
+      to save work — skipping items that have repeatedly failed, and keeping your totals across
+      page reloads.
+      <strong>It never decides whether a recognition is liked.</strong> That is read from the page's
+      DOM every single time, immediately before every click. Clearing history is always safe: at
+      worst the extension re-examines items it has seen before.
+    </p>
+    <p class="explain" id="history-count">Stored recognitions: —</p>
+    <div class="row">
+      <button id="clear-history" class="danger">Clear history</button>
+      <button id="restore-defaults">Restore defaults</button>
+    </div>
+  </section>
+
+  <p class="saved" id="saved" hidden>Saved.</p>
+</main>
+<script src="options.js"></script>
+</body>
+</html>

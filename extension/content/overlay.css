@@ -1,0 +1,10 @@
+/* Host positioning for the on-page STOP badge. The badge itself lives in a
+   shadow root, so the page's own CSS cannot reach into it and this file
+   cannot leak out into the page. */
+#ral-badge-host {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 2147483647;
+  pointer-events: auto;
+}

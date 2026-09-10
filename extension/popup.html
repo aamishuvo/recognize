@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+<title>Recognize Auto Liker</title>
+</head>
+<body>
+  <header>
+    <h1>Recognize Auto Liker</h1>
+    <span class="version" id="version"></span>
+  </header>
+
+  <section class="status">
+    <span class="dot" id="dot"></span>
+    <strong id="state">STOPPED</strong>
+    <span class="page" id="page">checking page…</span>
+  </section>
+
+  <p class="notice" id="notice" hidden></p>
+
+  <section class="stats">
+    <div><span>Scanned</span><b id="s-scanned">0</b></div>
+    <div><span>Already liked</span><b id="s-already">0</b></div>
+    <div class="hi"><span>New likes</span><b id="s-liked">0</b></div>
+    <div><span>Skipped</span><b id="s-skipped">0</b></div>
+    <div><span>Errors</span><b id="s-errors">0</b></div>
+  </section>
+
+  <section class="current">
+    <span>Current recognition</span>
+    <code id="current">—</code>
+  </section>
+
+  <section class="buttons">
+    <button id="start" class="primary">START</button>
+    <button id="pause">PAUSE</button>
+    <button id="stop" class="danger">STOP</button>
+  </section>
+
+  <button id="diagnose" class="wide subtle">Run diagnostic (clicks nothing)</button>
+
+  <details id="settings-panel">
+    <summary>Settings</summary>
+    <label>Scroll amount <input type="number" id="scrollAmount" min="0" step="50"><span class="u">px</span></label>
+    <label>Scroll delay <input type="number" id="scrollDelay" min="200" step="100"><span class="u">ms</span></label>
+    <label>Click delay <input type="number" id="clickDelay" min="200" step="100"><span class="u">ms</span></label>
+    <label>Maximum new likes <input type="number" id="maxLikesPerRun" min="1" step="1"><span class="u"></span></label>
+    <label>Stop after no new posts <input type="number" id="maxNoNewContentAttempts" min="1" step="1"><span class="u">×</span></label>
+    <div class="links">
+      <a href="#" id="open-options">All options</a>
+      <a href="#" id="reset-stats">Clear session stats</a>
+    </div>
+  </details>
+
+  <p class="hint">Press <kbd>Esc</kbd> on the Recognize tab for an emergency stop.</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

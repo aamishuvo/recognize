@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Recognize Auto Liker — test suite</title>
+<style>
+  body { font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+         margin: 0; padding: 22px; background: #f6f8fb; color: #1d2433; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { color: #667089; margin: 0 0 18px; }
+  #summary { font-weight: 700; padding: 10px 14px; border-radius: 8px; margin-bottom: 14px;
+             background: #e8eef7; }
+  #summary.pass { background: #dff3e6; color: #1c5c38; }
+  #summary.fail { background: #fbe3e3; color: #7a2020; }
+  ol { padding-left: 22px; margin: 0; }
+  li { padding: 5px 0; border-bottom: 1px solid #e6eaf2; }
+  .ok { color: #1c7c47; font-weight: 700; }
+  .no { color: #b02a2a; font-weight: 700; }
+  .why { color: #b02a2a; font-size: 13px; display: block; margin-left: 4px; }
+  .ms { color: #98a1b8; font-size: 12px; }
+  #stage { position: absolute; left: -10000px; top: 0; width: 620px; }
+</style>
+</head>
+<body>
+  <h1>Recognize Auto Liker — test suite</h1>
+  <p class="sub">
+    Runs the real engine against a mock RecognizeApp feed, in this browser.
+    No Node, no npm, no server — just open this file.
+  </p>
+  <div id="summary">Running…</div>
+  <ol id="results"></ol>
+
+  <!-- Tests build their feeds here, off-screen but fully laid out and scrollable. -->
+  <div id="stage"></div>
+
+<script src="../../extension/content/engine.js"></script>
+<script src="mock-feed.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var RAL = window.RecognizeAutoLiker;
+  var ID = MockFeed.id;
+  var stage = document.getElementById('stage');
+  var resultsEl = document.getElementById('results');
+  var summaryEl = document.getElementById('summary');
+
+  /* ------------------------------------------------------------ harness */
+  var TESTS = [];
+  function test(name, fn) { TESTS.push({ name: name, fn: fn }); }
+
+  function assert(cond, msg) { if (!cond) throw new Error(msg); }
+  function eq(actual, expected, msg) {
+    if (actual !== expected) {
+      throw new Error(msg + ' — expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(actual));
+    }
+  }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /** Fast but real timings: every code path runs, just with short waits. */
+  var FAST = {
+    clickDelay: 90, scrollDelay: 110, verifyTimeout: 900,
+    scrollAmount: 240, maxNoNewContentAttempts: 3, maxLikesPerRun: 500, debug: false
+  };
+
+  /** Builds a fresh mock feed and an engine bound to it. */
+  function setup(cfg, settings) {
+    var host = document.createElement('div');
+    stage.appendChild(host);
+    var mock = MockFeed.build(host, cfg);
+    var engine = RAL.createEngine({
+      root: mock.root,
+      settings: Object.assign({}, FAST, settings || {})
+    });
+    return { mock: mock, engine: engine, host: host };
+  }
+
+  /** Every test asserts this: no existing like may ever be removed. */
+  function assertNoDamage(mock) {
+    eq(mock.unlikedByAutomation.length, 0,
+      'NO existing like was removed (removed: ' + JSON.stringify(mock.unlikedByAutomation) + ')');
+    eq(mock.forbiddenClicks.length, 0,
+      'no approved control or decoy was clicked: ' + JSON.stringify(mock.forbiddenClicks));
+  }
+
+  /* =================================================================== */
+  /* THE SPEC'S REQUIRED TESTS                                            */
+  /* =================================================================== */
+
+  test('1. Unliked with 0 likes ("+") is clicked', async function () {
+    var s = setup({ cards: [{ id: ID(1), liked: false, count: 0 }] });
+    eq(s.mock.textOf(ID(1)), '+', 'renders a bare "+"');
+    var r = await s.engine.start();
+    eq(r.stats.newLikes, 1, 'it was liked');
+    eq(s.mock.clicks[ID(1)], 1, 'clicked exactly once');
+    eq(s.mock.snapshot()[ID(1)].method, 'delete', 'flipped to data-method="delete"');
+    assertNoDamage(s.mock);
+  });
+
+  test('2. Unliked showing "+4" is clicked (count is not state)', async function () {
+    var s = setup({ cards: [{ id: ID(2), liked: false, count: 4 }] });
+    eq(s.mock.textOf(ID(2)), '+4', 'renders "+4" while still UNLIKED by this user');
+    var r = await s.engine.start();
+    eq(r.stats.newLikes, 1, 'it was liked despite the high count');
+    eq(s.mock.textOf(ID(2)), '+5', 'total went 4 -> 5');
+    assertNoDamage(s.mock);
+  });
+
+  test('3. Already liked showing "+1" is NOT clicked', async function () {
+    var s = setup({ cards: [{ id: ID(3), liked: true, count: 0 }] });
+    eq(s.mock.textOf(ID(3)), '+1', 'renders "+1" and IS liked by this user');
+    var before = s.mock.snapshot()[ID(3)].href;
+    var r = await s.engine.start();
+    assert(!s.mock.clicks[ID(3)], 'never clicked');
+    eq(r.stats.newLikes, 0, 'no new likes');
+    eq(r.stats.alreadyLiked, 1, 'counted as already liked');
+    eq(s.mock.snapshot()[ID(3)].href, before, 'approval id untouched');
+    assertNoDamage(s.mock);
+  });
+
+  test('4. Already liked showing "+5" is NOT clicked', async function () {
+    var s = setup({ cards: [{ id: ID(4), liked: true, count: 4 }] });
+    eq(s.mock.textOf(ID(4)), '+5', 'renders "+5" and IS liked by this user');
+    await s.engine.start();
+    assert(!s.mock.clicks[ID(4)], 'never clicked');
+    eq(s.mock.likedCount(), 1, 'still liked');
+    assertNoDamage(s.mock);
+  });
+
+  test('5. A previously liked recognition met again is never toggled off', async function () {
+    var s = setup({ cards: [
+      { id: ID(5), liked: true, count: 2 },
+      { id: ID(6), liked: false, count: 1 }
+    ] });
+    var before = s.mock.snapshot();
+    await s.engine.start();                       // first pass
+    var second = s.engine.start ? await RAL.createEngine({
+      root: s.mock.root, settings: FAST
+    }).start() : null;                            // a whole fresh engine, same feed
+    var after = s.mock.snapshot();
+    eq(second.stats.newLikes, 0, 'the second pass liked nothing');
+    eq(after[ID(5)].href, before[ID(5)].href, 'the pre-existing like is byte-identical');
+    eq(after[ID(5)].method, 'delete', 'still liked');
+    eq(after[ID(6)].method, 'delete', 'the one we liked stayed liked');
+    assertNoDamage(s.mock);
+  });
+
+  test('6. DOM flipping to approved just before the click prevents the click', async function () {
+    var target = ID(7);
+    // A long pre-click delay, so the flip lands inside it deterministically.
+    var s = setup({ cards: [{ id: target, liked: false, count: 3 }] }, { clickDelay: 700 });
+    var run = s.engine.start();
+    await wait(120);
+    eq(s.mock.makeApproved(target), true, 'the feed flipped it to approved mid-delay');
+    var r = await run;
+    assert(!s.mock.clicks[target], 'the re-check caught it: never clicked');
+    eq(r.stats.alreadyLiked, 1, 'counted as already liked instead');
+    assertNoDamage(s.mock);
+
+    // And the gate itself rejects an approved element outright.
+    var approved = s.host.querySelector('a.approval_link.approved');
+    eq(RAL.isSafeToLike(approved), false, 'isSafeToLike() rejects an approved element');
+    eq(RAL.safetyCheck(approved).reason, 'approved-NEVER-CLICK', 'and says why');
+  });
+
+  test('7. A recognition loaded after scrolling is detected and liked', async function () {
+    var initial = [];
+    for (var i = 10; i < 18; i++) initial.push({ id: ID(i), liked: false, count: i % 5 });
+    var s = setup({
+      cards: initial,
+      batches: [[{ id: ID(90), liked: false, count: 2 }, { id: ID(91), liked: true, count: 1 }]],
+      loadDelay: 120, height: 260
+    });
+    var r = await s.engine.start();
+    eq(s.mock.batchesLoaded, 1, 'the lazy batch loaded during scrolling');
+    eq(s.mock.clicks[ID(90)], 1, 'the lazily loaded unliked card was liked');
+    assert(!s.mock.clicks[ID(91)], 'the lazily loaded liked card was not touched');
+    eq(r.stats.newLikes, 9, 'all 9 unliked recognitions were liked');
+    assertNoDamage(s.mock);
+  });
+
+  test('8. The same recognition appearing twice is clicked only once', async function () {
+    var dupe = ID(20);
+    var s = setup({ cards: [
+      { id: dupe, liked: false, count: 1 },
+      { id: ID(21), liked: false, count: 0 },
+      { id: dupe, liked: false, count: 1 }     // same recognition, second card
+    ] });
+    var r = await s.engine.start();
+    eq(s.mock.clicks[dupe], 1, 'the duplicated recognition was clicked exactly once');
+    eq(r.stats.newLikes, 2, 'two distinct recognitions liked');
+    assertNoDamage(s.mock);
+  });
+
+  test('9. PAUSE stops processing; RESUME continues', async function () {
+    var cards = [];
+    for (var i = 30; i < 60; i++) cards.push({ id: ID(i), liked: false, count: 0 });
+    var s = setup({ cards: cards }, { clickDelay: 400 });
+    s.engine.start();
+    await wait(1400);
+    assert(s.mock.totalClicks > 0, 'it was clicking before PAUSE');
+    eq(s.engine.pause(), true, 'paused');
+    await wait(700);                              // let the in-flight click settle
+    var atPause = s.mock.totalClicks;
+    await wait(1200);
+    eq(s.mock.totalClicks, atPause, 'no new clicks while PAUSED');
+    eq(s.engine.getState(), 'PAUSED', 'state is PAUSED');
+    s.engine.resume();
+    await wait(1400);
+    assert(s.mock.totalClicks > atPause, 'clicking resumed');
+    s.engine.stop('test cleanup');
+    await s.engine.waitForIdle();
+    assertNoDamage(s.mock);
+  });
+
+  test('10. STOP halts immediately and no click follows', async function () {
+    var cards = [];
+    for (var i = 60; i < 90; i++) cards.push({ id: ID(i), liked: false, count: 0 });
+    var s = setup({ cards: cards }, { clickDelay: 400 });
+    var run = s.engine.start();
+    await wait(1400);
+    assert(s.mock.totalClicks > 0, 'it was clicking before STOP');
+    s.engine.stop('test');
+    var r = await run;
+    var atStop = s.mock.totalClicks;
+    eq(r.reason, 'STOPPED_BY_USER', 'ended with the user-stop reason');
+    eq(s.engine.getState(), 'STOPPED', 'state is STOPPED');
+    await wait(1200);
+    eq(s.mock.totalClicks, atStop, 'nothing was clicked after STOP');
+    assert(r.stats.newLikes < 30, 'stopped before finishing the feed');
+    assertNoDamage(s.mock);
+  });
+
+  test('11. Esc emergency stop halts the run', async function () {
+    var cards = [];
+    for (var i = 100; i < 130; i++) cards.push({ id: ID(i), liked: false, count: 0 });
+    var s = setup({ cards: cards }, { clickDelay: 400 });
+
+    // The identical capture-phase handler that content.js installs.
+    function onKey(e) {
+      if (e.key === 'Escape' || e.keyCode === 27) {
+        if (s.engine.getState() !== 'STOPPED') s.engine.stop('Esc emergency stop');
+      }
+    }
+    window.addEventListener('keydown', onKey, true);
+    try {
+      var run = s.engine.start();
+      await wait(1400);
+      assert(s.mock.totalClicks > 0, 'it was clicking before Esc');
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+      var r = await run;
+      var atStop = s.mock.totalClicks;
+      eq(r.reason, 'STOPPED_BY_USER', 'Esc stopped the run');
+      await wait(900);
+      eq(s.mock.totalClicks, atStop, 'no clicks after Esc');
+    } finally {
+      window.removeEventListener('keydown', onKey, true);
+    }
+    assertNoDamage(s.mock);
+  });
+
+  test('12. A hidden document does not stop the run (background/minimised)', async function () {
+    var s = setup({ cards: [
+      { id: ID(140), liked: false, count: 0 },
+      { id: ID(141), liked: false, count: 6 }
+    ] });
+    var original = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    try {
+      var r = await s.engine.start();
+      eq(r.stats.newLikes, 2, 'both were liked while document.hidden was true');
+    } finally {
+      delete document.hidden;
+      if (original) Object.defineProperty(Document.prototype, 'hidden', original);
+    }
+    assertNoDamage(s.mock);
+  });
+
+  /* =================================================================== */
+  /* DAY 1 / DAY 2 IDEMPOTENCY — mandatory                                */
+  /* =================================================================== */
+
+  test('13. Day 1 / Day 2 idempotency: A and B are never unliked', async function () {
+    var A = ID(201), B = ID(202), C = ID(203);
+
+    // ---- DAY 1: A and B unliked, both get liked ----
+    var s = setup({ cards: [
+      { id: A, liked: false, count: 4 },
+      { id: B, liked: false, count: 0 }
+    ] });
+    var day1 = await s.engine.start();
+    eq(day1.stats.newLikes, 2, 'day 1 liked A and B');
+    var afterDay1 = s.mock.snapshot();
+    eq(afterDay1[A].method, 'delete', 'A is approved+delete');
+    eq(afterDay1[B].method, 'delete', 'B is approved+delete');
+    var clicksAfterDay1 = s.mock.totalClicks;
+
+    // ---- DAY 2: A and B already approved, C is new ----
+    s.mock.addCards([{ id: C, liked: false, count: 2 }]);
+    var day2Engine = RAL.createEngine({ root: s.mock.root, settings: FAST });
+    var day2 = await day2Engine.start();
+    var afterDay2 = s.mock.snapshot();
+
+    eq(day2.stats.newLikes, 1, 'day 2 liked exactly one recognition');
+    eq(s.mock.clicks[C], 1, 'and it was C');
+    eq(s.mock.clicks[A], 1, 'A was not clicked again (still 1 click, from day 1)');
+    eq(s.mock.clicks[B], 1, 'B was not clicked again');
+    eq(s.mock.totalClicks, clicksAfterDay1 + 1, 'exactly one new click on day 2');
+    eq(afterDay2[A].href, afterDay1[A].href, 'A keeps its original approval id');
+    eq(afterDay2[B].href, afterDay1[B].href, 'B keeps its original approval id');
+    eq(afterDay2[A].method, 'delete', 'A is still liked');
+    eq(afterDay2[B].method, 'delete', 'B is still liked');
+    eq(day2.stats.alreadyLiked, 2, 'day 2 saw A and B as already liked');
+    assertNoDamage(s.mock);
+  });
+
+  /* =================================================================== */
+  /* ADDITIONAL SAFETY AND BEHAVIOUR                                      */
+  /* =================================================================== */
+
+  test('14. Identical "+4" text, opposite actions', async function () {
+    var unlikedFour = ID(210), likedFour = ID(211);
+    var s = setup({ cards: [
+      { id: unlikedFour, liked: false, count: 4 },   // shows +4, NOT liked
+      { id: likedFour, liked: true, count: 3 }       // shows +4, IS liked
+    ] });
+    eq(s.mock.textOf(unlikedFour), '+4', 'the unliked one shows +4');
+    eq(s.mock.textOf(likedFour), '+4', 'the liked one shows the same +4');
+    var before = s.mock.snapshot()[likedFour].href;
+    var r = await s.engine.start();
+    eq(s.mock.clicks[unlikedFour], 1, 'the unliked "+4" was clicked');
+    assert(!s.mock.clicks[likedFour], 'the liked "+4" was NOT clicked');
+    eq(s.mock.snapshot()[likedFour].href, before, 'its approval id is unchanged');
+    eq(r.stats.newLikes, 1, 'exactly one new like');
+    assertNoDamage(s.mock);
+  });
+
+  test('15. Decoy controls are never clicked', async function () {
+    var s = setup({ cards: [{ id: ID(220), liked: false, count: 0 }] });
+    await s.engine.start();
+    eq(s.mock.forbiddenClicks.length, 0, 'no decoy was clicked');
+    var commentDecoy = s.host.querySelector('a[data-decoy="comment"]');
+    var eventDecoy = s.host.querySelector('a[data-decoy="event"]');
+    assert(commentDecoy.classList.contains('unapproved'), 'comment-category decoy untouched');
+    assert(eventDecoy.classList.contains('unapproved'), 'wrong-event decoy untouched');
+    eq(RAL.isSafeToLike(commentDecoy), false, 'gate rejects the comment decoy');
+    eq(RAL.isSafeToLike(eventDecoy), false, 'gate rejects the wrong-event decoy');
+  });
+
+  test('16. Maximum new likes is respected', async function () {
+    var cards = [];
+    for (var i = 230; i < 250; i++) cards.push({ id: ID(i), liked: false, count: 0 });
+    var s = setup({ cards: cards }, { maxLikesPerRun: 4 });
+    var r = await s.engine.start();
+    eq(r.reason, 'MAX_LIKES_REACHED', 'stopped for the max-likes reason');
+    eq(r.stats.newLikes, 4, 'liked exactly the configured maximum');
+    eq(s.mock.totalClicks, 4, 'exactly four clicks dispatched');
+    assertNoDamage(s.mock);
+  });
+
+  test('17. End of feed is detected and the run ends by itself', async function () {
+    var cards = [];
+    for (var i = 260; i < 272; i++) cards.push({ id: ID(i), liked: false, count: 0 });
+    var s = setup({ cards: cards, height: 240 });
+    var r = await s.engine.start();
+    eq(r.reason, 'END_OF_FEED', 'ended with END_OF_FEED');
+    eq(r.stats.newLikes, 12, 'liked everything first');
+    assertNoDamage(s.mock);
+  });
+
+  test('18. A click that never registers gets one retry, then is an error', async function () {
+    var broken = ID(280);
+    var s = setup({ cards: [
+      { id: broken, liked: false, count: 0, behavior: 'fail' },
+      { id: ID(281), liked: false, count: 0 }
+    ] });
+    var r = await s.engine.start();
+    eq(s.mock.clicks[broken], 2, 'clicked exactly twice (1 attempt + 1 retry)');
+    eq(r.stats.errors, 1, 'one error recorded');
+    eq(r.stats.newLikes, 1, 'the healthy one still got liked');
+    eq(s.engine.failedIds().join(','), broken, 'the failing id is reported');
+    assertNoDamage(s.mock);
+  });
+
+  test('19. A card that disappears mid-click does not break the run', async function () {
+    var s = setup({ cards: [
+      { id: ID(290), liked: false, count: 0, behavior: 'vanish' },
+      { id: ID(291), liked: false, count: 0 }
+    ] });
+    var r = await s.engine.start();
+    eq(s.mock.clicks[ID(290)], 1, 'the vanishing card was clicked once and never re-clicked');
+    eq(r.stats.newLikes, 1, 'the surviving card was liked');
+    assert(r.reason === 'END_OF_FEED' || r.reason === 'MAX_LIKES_REACHED', 'run completed cleanly');
+    assertNoDamage(s.mock);
+  });
+
+  test('20. The gate rejects every never-click shape', function () {
+    var cases = [
+      ['approved class', '<a class="approval_link approved" data-category="recognition" data-event="liked" data-method="delete" href="/x/recognitions/aaa/approvals/1">+1</a>', 'approved-NEVER-CLICK'],
+      ['delete method', '<a class="approval_link unapproved" data-category="recognition" data-event="liked" data-method="delete" href="/x/recognitions/bbb/approvals/2">+1</a>', 'delete-method-NEVER-CLICK'],
+      ['comment category', '<a class="approval_link unapproved" data-category="comment" data-event="liked" data-method="post" href="/x/comments/c/approvals">+</a>', 'not-recognition-category'],
+      ['wrong event', '<a class="approval_link unapproved" data-category="recognition" data-event="commented" data-method="post" href="/x/recognitions/ccc/approvals">+</a>', 'not-liked-event'],
+      ['not an approval link', '<a class="btn unapproved" data-category="recognition" data-event="liked" data-method="post" href="/x/recognitions/ddd/approvals">+</a>', 'not-an-approval-link'],
+      ['no recognition id', '<a class="approval_link unapproved" data-category="recognition" data-event="liked" data-method="post" href="/x/somewhere/else">+</a>', 'no-recognition-id-in-href'],
+      ['not an anchor', '<button class="approval_link unapproved" data-category="recognition" data-event="liked" data-method="post"></button>', 'not-an-anchor']
+    ];
+    var holder = document.createElement('div');
+    stage.appendChild(holder);
+    cases.forEach(function (c) {
+      holder.innerHTML = c[1];
+      var el = holder.firstElementChild;
+      eq(RAL.isSafeToLike(el), false, c[0] + ' is refused');
+      eq(RAL.safetyCheck(el).reason, c[2], c[0] + ' reports the right reason');
+    });
+    // ...and the one shape that IS allowed.
+    holder.innerHTML = '<a class="approval_link unapproved btn" data-category="recognition" ' +
+      'data-event="liked" data-method="post" href="/x/recognitions/rglauokd/approvals?approvers_limit=5">+4</a>';
+    eq(RAL.isSafeToLike(holder.firstElementChild), true, 'the documented unliked shape is allowed');
+    eq(RAL.recognitionIdOf(holder.firstElementChild), 'rglauokd', 'recognition id extracted from href');
+  });
+
+  /* =================================================================== */
+  var results = [];
+  async function run() {
+    for (var i = 0; i < TESTS.length; i++) {
+      var t = TESTS[i];
+      var started = Date.now();
+      var li = document.createElement('li');
+      resultsEl.appendChild(li);
+      try {
+        await t.fn();
+        var ms = Date.now() - started;
+        li.innerHTML = '<span class="ok">PASS</span> ' + t.name + ' <span class="ms">(' + ms + 'ms)</span>';
+        results.push({ name: t.name, ok: true });
+      } catch (err) {
+        li.innerHTML = '<span class="no">FAIL</span> ' + t.name +
+          '<span class="why">' + String(err && err.message) + '</span>';
+        results.push({ name: t.name, ok: false, error: String(err && err.message) });
+      }
+    }
+    var failed = results.filter(function (r) { return !r.ok; }).length;
+    summaryEl.textContent = (results.length - failed) + ' / ' + results.length + ' passed';
+    summaryEl.className = failed ? 'fail' : 'pass';
+    window.__testResults = { total: results.length, failed: failed, results: results };
+    window.__testsDone = true;
+  }
+
+  run();
+})();
+</script>
+</body>
+</html>

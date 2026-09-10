@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Recognize Auto Liker — automated test suite.
+ * Headless wrapper around tests/mock/test-runner.html.
  *
- * Drives the real core engine against tests/mock/feed.html in a real Chromium
- * via Playwright. Nothing here touches RecognizeApp.
+ * The tests themselves live in that HTML file and run in any browser with no
+ * tooling at all — this script just opens the same file in headless Chromium
+ * so the suite can run in a terminal or CI. It is NOT needed to use or verify
+ * the extension.
  *
- *   node tests/run-tests.cjs            (all tests)
- *   node tests/run-tests.cjs --headed   (watch it work)
- *   node tests/run-tests.cjs 4 8        (only tests #4 and #8)
+ *   node tests/run-tests.cjs [--headed]
  */
 'use strict';
 
@@ -16,410 +16,323 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 function loadPlaywright() {
-  try { return require('playwright'); } catch (e) { /* fall through */ }
+  try { return require('playwright'); } catch (e) { /* try global */ }
   try {
-    const root = execSync('npm root -g', { encoding: 'utf8' }).trim();
-    return require(path.join(root, 'playwright'));
+    return require(path.join(execSync('npm root -g', { encoding: 'utf8' }).trim(), 'playwright'));
   } catch (e) {
-    console.error('\nPlaywright is not installed. Run:  npm install\n');
+    console.error('\nPlaywright not found. The browser suite needs no tooling:');
+    console.error('just open tests/mock/test-runner.html in Chrome.\n');
     process.exit(1);
   }
 }
+
 const { chromium } = loadPlaywright();
-
 const ROOT = path.resolve(__dirname, '..');
-const CORE = fs.readFileSync(path.join(ROOT, 'src', 'recognize-auto-liker.js'), 'utf8');
-const MOCK = 'file://' + path.join(ROOT, 'tests', 'mock', 'feed.html');
+const RUNNER = 'file://' + path.join(ROOT, 'tests', 'mock', 'test-runner.html');
 
-const HEADED = process.argv.includes('--headed');
-const ONLY = process.argv.slice(2).filter((a) => /^\d+$/.test(a)).map(Number);
-
-/* ---------------------------------------------------------------- helpers */
-const results = [];
-let browser;
-
-function assert(cond, msg) {
-  if (!cond) throw new Error('Assertion failed: ' + msg);
+/** Removes block and line comments so source checks measure code, not prose. */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
+    .join('\n');
 }
-function eq(actual, expected, msg) {
-  if (actual !== expected) {
-    throw new Error(`Assertion failed: ${msg} (expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)})`);
+
+/** Source-level invariants that a behavioural test cannot prove. */
+function staticChecks() {
+  const engine = fs.readFileSync(path.join(ROOT, 'extension', 'content', 'engine.js'), 'utf8');
+  const content = fs.readFileSync(path.join(ROOT, 'extension', 'content', 'content.js'), 'utf8');
+  const findings = [];
+
+  // Every .click() in the codebase must be the single gated one. Strip comments
+  // first: this check is about executable code, not about prose describing it.
+  const engineCode = stripComments(engine);
+  const engineClicks = engineCode.match(/\.click\(\)/g) || [];
+  if (engineClicks.length !== 1) {
+    findings.push(`engine.js has ${engineClicks.length} .click() calls in code; exactly 1 (inside performClick) is allowed`);
   }
-}
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Open the mock feed and inject the engine (panel + API), without starting it. */
-async function openFeed(query = {}, viewport = { width: 900, height: 700 }) {
-  const page = await browser.newPage({ viewport });
-  const params = new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]));
-  await page.goto(MOCK + (params.toString() ? '?' + params.toString() : ''));
-  await page.waitForFunction(() => window.__mock && window.__mock.ready);
-  await page.addScriptTag({ content: CORE });
-  await page.waitForFunction(() => window.__RecognizeAutoLiker__ && window.__RecognizeAutoLiker__.__mounted);
-  return page;
-}
-
-/** Start a run and wait for it to finish; returns {reason, stats}. */
-async function runToCompletion(page, cfg) {
-  return page.evaluate(async (c) => {
-    const L = window.__RecognizeAutoLiker__;
-    L.setConfig(c);
-    return await L.start();
-  }, cfg);
-}
-
-const mockState = (page) => page.evaluate(() => ({
-  clicks: window.__mock.clicks,
-  totalClicks: window.__mock.totalClicks,
-  forbiddenClicks: window.__mock.forbiddenClicks,
-  unlikedByAutomation: window.__mock.unlikedByAutomation,
-  approvedIds: window.__mock.approvedIds,
-  batchesLoaded: window.__mock.batchesLoaded,
-  unlikedLeft: window.__mock.unlikedCount(),
-  likedNow: window.__mock.likedCount()
-}));
-
-/** The one failure that must never happen: an existing like was removed. */
-function assertNoLikesRemoved(m) {
-  eq(m.unlikedByAutomation.length, 0,
-    'NO existing like was ever removed (removed: ' + JSON.stringify(m.unlikedByAutomation) + ')');
-  eq(m.forbiddenClicks.length, 0,
-    'no approved/decoy control was clicked: ' + JSON.stringify(m.forbiddenClicks));
-}
-
-/** Fast timings so the suite runs in seconds while keeping every code path. */
-const FAST = { baseDelay: 150, maxNoNewContentAttempts: 3, verbose: false };
-
-/* ------------------------------------------------------------------ tests */
-const TESTS = [];
-const test = (name, fn) => TESTS.push({ name, fn });
-
-test('1. Clicks unliked recognitions and verifies the state flips', async () => {
-  const page = await openFeed({ cards: 6, pages: 0, likedEvery: 3, slow: 50 });
-  const res = await runToCompletion(page, { ...FAST, maxLikes: 500 });
-  const m = await mockState(page);
-
-  eq(res.stats.liked, 4, 'four unliked recognitions were liked');
-  eq(res.stats.alreadyLiked, 2, 'two were already liked');
-  eq(res.stats.failed, 0, 'no failures');
-  eq(res.stats.detected, 6, 'six recognitions detected');
-  eq(m.unlikedLeft, 0, 'no unliked approval links remain in the DOM');
-  eq(m.likedNow, 6, 'all six now render approved + data-method="delete"');
-  assertNoLikesRemoved(m);
-
-  // The exact documented transition, per recognition we clicked.
-  const after = await page.evaluate(() => window.__mock.snapshot());
-  for (const id of Object.keys(m.clicks)) {
-    assert(after[id].cls.includes('approved') && !after[id].cls.includes('unapproved'),
-      id + ' carries .approved and no longer .unapproved');
-    eq(after[id].method, 'delete', id + ' flipped data-method post -> delete');
-    assert(/\/approvals\/\d+/.test(after[id].href),
-      id + ' href gained the approval id: ' + after[id].href);
+  if (!/function performClick\(el\) \{\s*\n\s*var g = gate\(el\);\s*\n\s*if \(!g\.ok\) throw/.test(engine)) {
+    findings.push('performClick() no longer re-runs the gate immediately before clicking');
   }
-  await page.close();
-});
-
-test('2. Never clicks an already-approved recognition or any decoy control', async () => {
-  const page = await openFeed({ cards: 9, pages: 0, likedEvery: 2, slow: 50 });
-  const before = await page.evaluate(() =>
-    [...document.querySelectorAll('a.approval_link.approved[data-category="recognition"]')]
-      .map((a) => a.getAttribute('href')));
-  const res = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
-
-  assertNoLikesRemoved(m);
-  const clickedIds = Object.keys(m.clicks);
-  for (const href of before) {
-    const id = href.match(/\/recognitions\/([^/]+)\/approvals/)[1];
-    assert(!clickedIds.includes(id), `already-liked ${id} was not clicked`);
+  if (/\.click\(\)/.test(stripComments(content))) {
+    findings.push('content.js dispatches a click of its own — all clicks must go through the engine');
   }
-  // Decoy controls must be untouched.
-  const decoys = await page.evaluate(() => ({
-    comment: document.getElementById('decoy-comment-approval').className,
-    event: document.getElementById('decoy-event').className
-  }));
-  assert(decoys.comment.includes('unapproved'), 'comment approval decoy untouched');
-  assert(decoys.event.includes('unapproved'), 'wrong-event decoy untouched');
-  eq(res.stats.alreadyLiked, before.length, 'already-liked count matches the DOM');
-  await page.close();
-});
 
-test('3. Never clicks the same recognition twice (dedupe across re-scans)', async () => {
-  const page = await openFeed({ cards: 8, pages: 2, perPage: 4, likedEvery: 0, slow: 50, loadDelay: 250 });
-  const res = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
+  // The engine must not gate on tab visibility or use frame callbacks.
+  for (const bad of ['document.hidden', 'visibilityState', 'requestAnimationFrame']) {
+    if (engine.includes(bad)) findings.push(`engine.js references ${bad}; background tabs must keep working`);
+  }
 
-  const dupes = Object.entries(m.clicks).filter(([, n]) => n > 1);
-  eq(dupes.length, 0, 'no recognition was clicked more than once: ' + JSON.stringify(dupes));
-  eq(m.totalClicks, res.stats.liked, 'click count equals like count');
-  await page.close();
-});
+  // No credential/cookie surface anywhere in the extension.
+  const extFiles = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (/\.(js|json|html)$/.test(entry.name)) extFiles.push(p);
+    }
+  })(path.join(ROOT, 'extension'));
 
-test('4. Handles the dynamic / infinite feed and likes newly loaded cards', async () => {
-  const page = await openFeed({ cards: 6, pages: 2, perPage: 4, likedEvery: 0, slow: 50, loadDelay: 300 });
-  const res = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
+  for (const file of extFiles) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const bad of ['document.cookie', 'chrome.cookies', 'XMLHttpRequest', 'navigator.credentials']) {
+      if (text.includes(bad)) findings.push(`${path.relative(ROOT, file)} references ${bad}`);
+    }
+    if (/\bfetch\s*\(/.test(text)) findings.push(`${path.relative(ROOT, file)} calls fetch()`);
+  }
 
-  eq(m.batchesLoaded, 2, 'both dynamic batches were loaded by scrolling');
-  eq(res.stats.detected, 14, 'detected the initial 6 plus 8 lazily loaded');
-  eq(res.stats.liked, 14, 'liked every recognition including lazily loaded ones');
-  eq(m.unlikedLeft, 0, 'nothing left unliked');
-  await page.close();
-});
+  // Message names must line up across popup <-> content <-> background.
+  const popup = fs.readFileSync(path.join(ROOT, 'extension', 'popup.js'), 'utf8');
+  const optionsJs = fs.readFileSync(path.join(ROOT, 'extension', 'options.js'), 'utf8');
+  const bg = fs.readFileSync(path.join(ROOT, 'extension', 'background.js'), 'utf8');
+  const wiring = [
+    ['RAL_COMMAND', [popup, content], 'popup sends it, content receives it'],
+    ['RAL_STATUS', [content, bg], 'content sends it, background caches it'],
+    ['RAL_GET_CACHED_STATUS', [popup, bg], 'popup asks, background answers'],
+    ['RAL_GET_DEFAULTS', [optionsJs, bg], 'options asks, background answers']
+  ];
+  for (const [name, sources, why] of wiring) {
+    if (!sources.every((src) => src.includes(name))) findings.push(`message ${name} is not wired on both ends (${why})`);
+  }
 
-test('5. Detects end of feed and stops on its own', async () => {
-  // Enough initial cards that the feed actually overflows and can be scrolled.
-  const page = await openFeed({ cards: 10, pages: 1, perPage: 4, likedEvery: 0, slow: 50, loadDelay: 250 });
-  const t0 = Date.now();
-  const res = await runToCompletion(page, { ...FAST, maxNoNewContentAttempts: 3 });
-  const elapsed = Date.now() - t0;
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'extension', 'manifest.json'), 'utf8'));
+  if (manifest.manifest_version !== 3) findings.push('manifest is not MV3');
+  for (const perm of manifest.permissions || []) {
+    if (!['storage', 'alarms'].includes(perm)) findings.push(`unexpected permission: ${perm}`);
+  }
+  for (const host of manifest.host_permissions || []) {
+    if (!host.includes('recognizeapp.com')) findings.push(`host permission beyond Recognize: ${host}`);
+  }
+  const referenced = [
+    manifest.background.service_worker,
+    manifest.action.default_popup,
+    manifest.options_page,
+    ...manifest.content_scripts.flatMap((cs) => [...(cs.js || []), ...(cs.css || [])]),
+    ...Object.values(manifest.icons || {}),
+    ...Object.values(manifest.action.default_icon || {})
+  ];
+  for (const rel of referenced) {
+    if (!fs.existsSync(path.join(ROOT, 'extension', rel))) findings.push(`manifest references missing file: ${rel}`);
+  }
 
-  eq(res.reason, 'END_OF_FEED', 'terminated with END_OF_FEED');
-  eq(res.stats.liked, 14, 'liked all 14 recognitions before stopping');
-  assert(elapsed < 60000, 'terminated in bounded time (' + elapsed + 'ms)');
-  await page.close();
-});
+  return findings;
+}
 
-test('6. STOP immediately prevents further clicks', async () => {
-  const page = await openFeed({ cards: 40, pages: 0, likedEvery: 0, slow: 50 });
-  await page.evaluate((c) => {
-    const L = window.__RecognizeAutoLiker__;
-    L.setConfig(c);
-    window.__run = L.start();
-  }, { ...FAST, baseDelay: 500, maxLikes: 500 });
+/** Minimal chrome.* stub so popup.html / options.html can be driven headlessly. */
+function chromeStub(tabUrl, opts) {
+  return `(${function (url, o) {
+    const clone = (x) => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
+    window.__msgs = [];
+    window.__storage = { settings: o.settings || {}, history: o.history || {} };
+    window.__tabUrl = url;
+    window.__tabResponds = o.tabResponds;
+    window.__tabStatus = o.tabStatus || null;
+    window.__defaults = o.defaults;
+    window.chrome = {
+      runtime: {
+        lastError: undefined,
+        getManifest: () => ({ version: '2.0.0' }),
+        openOptionsPage: () => window.__msgs.push({ type: 'OPEN_OPTIONS' }),
+        sendMessage: (msg, cb) => {
+          window.__msgs.push(clone(msg));
+          let resp = null;
+          if (msg.type === 'RAL_GET_DEFAULTS') resp = clone(window.__defaults);
+          if (msg.type === 'RAL_GET_CACHED_STATUS') resp = clone(o.cachedStatus) || null;
+          if (cb) { cb(resp); return undefined; }
+          return Promise.resolve(resp);
+        }
+      },
+      storage: {
+        local: {
+          get: (keys, cb) => {
+            let out = {};
+            if (keys === null || keys === undefined) out = clone(window.__storage);
+            else if (typeof keys === 'string') out[keys] = clone(window.__storage[keys]);
+            else if (Array.isArray(keys)) keys.forEach((k) => { out[k] = clone(window.__storage[k]); });
+            if (cb) { cb(out); return undefined; }
+            return Promise.resolve(out);
+          },
+          set: (obj, cb) => {
+            Object.assign(window.__storage, clone(obj));
+            window.__msgs.push({ type: 'STORAGE_SET', obj: clone(obj) });
+            if (cb) { cb(); return undefined; }
+            return Promise.resolve();
+          },
+          remove: (key, cb) => {
+            delete window.__storage[key];
+            if (cb) { cb(); return undefined; }
+            return Promise.resolve();
+          }
+        }
+      },
+      tabs: {
+        query: () => Promise.resolve([{ id: 7, url: window.__tabUrl }]),
+        sendMessage: (tabId, msg, cb) => {
+          window.__msgs.push(Object.assign({ to: tabId }, clone(msg)));
+          if (!window.__tabResponds) {
+            window.chrome.runtime.lastError = { message: 'Receiving end does not exist' };
+            if (cb) cb(undefined);
+            window.chrome.runtime.lastError = undefined;
+            return;
+          }
+          window.chrome.runtime.lastError = undefined;
+          if (cb) cb({ ok: true, status: clone(window.__tabStatus), report: clone(o.report) });
+        }
+      }
+    };
+  }})(${JSON.stringify(tabUrl)}, ${JSON.stringify(opts)})`;
+}
 
-  await wait(2500);
-  const midway = await page.evaluate(() => window.__RecognizeAutoLiker__.stats().liked);
-  assert(midway > 0, 'engine was actually liking before STOP (' + midway + ')');
+const DEFAULTS = {
+  scrollAmount: 700, scrollDelay: 1500, clickDelay: 1200, maxLikesPerRun: 100,
+  maxNoNewContentAttempts: 5, minClickDelay: null, maxClickDelay: null,
+  verifyTimeout: 3000, historyFailureLimit: 3, showBadge: true, debug: false
+};
 
-  await page.evaluate(() => window.__RecognizeAutoLiker__.stop('test'));
-  const res = await page.evaluate(() => window.__run);
-  const clicksAtStop = (await mockState(page)).totalClicks;
+async function uiChecks(browser) {
+  const results = [];
+  const check = (name, fn) => results.push({ name, fn });
+  const eq = (a, b, m) => { if (a !== b) throw new Error(`${m} — expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  eq(res.reason, 'STOPPED', 'run ended with reason STOPPED');
-  eq(await page.evaluate(() => window.__RecognizeAutoLiker__.state), 'STOPPED', 'state is STOPPED');
-  assert(res.stats.liked < 40, 'stopped before finishing the feed (' + res.stats.liked + '/40)');
+  async function openPopup(url, opts) {
+    const page = await browser.newPage();
+    await page.addInitScript(chromeStub(url, Object.assign({ defaults: DEFAULTS, settings: DEFAULTS }, opts)));
+    await page.goto('file://' + path.join(ROOT, 'extension', 'popup.html'));
+    await wait(250);
+    return page;
+  }
 
-  await wait(1500);
-  eq((await mockState(page)).totalClicks, clicksAtStop, 'no clicks happened after STOP');
-  await page.close();
-});
-
-test('7. PAUSE halts new clicks and lets the current one finish; RESUME continues', async () => {
-  const page = await openFeed({ cards: 40, pages: 0, likedEvery: 0, slow: 50 });
-  await page.evaluate((c) => {
-    const L = window.__RecognizeAutoLiker__;
-    L.setConfig(c);
-    window.__run = L.start();
-  }, { ...FAST, baseDelay: 500, maxLikes: 500 });
-
-  await wait(2500);
-  await page.evaluate(() => window.__RecognizeAutoLiker__.pause());
-  eq(await page.evaluate(() => window.__RecognizeAutoLiker__.state), 'PAUSED', 'state is PAUSED');
-
-  await wait(1200);                                   // let the in-flight click settle
-  const atPause = (await mockState(page)).totalClicks;
-  await wait(2000);                                   // stay paused
-  eq((await mockState(page)).totalClicks, atPause, 'no new clicks while PAUSED');
-
-  await page.evaluate(() => window.__RecognizeAutoLiker__.resume());
-  eq(await page.evaluate(() => window.__RecognizeAutoLiker__.state), 'RUNNING', 'state is RUNNING after resume');
-  await wait(2500);
-  assert((await mockState(page)).totalClicks > atPause, 'clicking continued after RESUME');
-
-  await page.evaluate(() => window.__RecognizeAutoLiker__.stop('test cleanup'));
-  await page.evaluate(() => window.__run);
-  await page.close();
-});
-
-test('8. Click failure: one retry, then marked failed — never hammered', async () => {
-  const page = await openFeed({ cards: 3, pages: 0, likedEvery: 0, slow: 50, fail: 'rgl00001' });
-  const res = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
-
-  eq(res.stats.failed, 1, 'exactly one failure recorded');
-  eq(res.stats.liked, 2, 'the other two were liked');
-  eq(m.clicks['rgl00001'], 2, 'failing recognition clicked exactly twice (1 attempt + 1 retry)');
-  const failed = await page.evaluate(() => window.__RecognizeAutoLiker__.failedIds());
-  eq(failed.join(','), 'rgl00001', 'failed id reported');
-  await page.close();
-});
-
-test('9. Survives DOM elements disappearing (during and before the click)', async () => {
-  // (a) card removed by the app in response to the click
-  const page = await openFeed({ cards: 4, pages: 0, likedEvery: 0, slow: 50, vanish: 'rgl00002' });
-  const res = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
-  eq(m.clicks['rgl00002'], 1, 'vanishing recognition clicked once, never re-clicked');
-  eq(res.stats.liked, 3, 'the surviving three were liked');
-  assert(res.reason === 'END_OF_FEED' || res.reason === 'MAX_LIKES_REACHED', 'run completed cleanly: ' + res.reason);
-  await page.close();
-
-  // (b) card removed while the engine is in its pre-click delay
-  const page2 = await openFeed({ cards: 2, pages: 0, likedEvery: 0, slow: 50 });
-  await page2.evaluate((c) => {
-    const L = window.__RecognizeAutoLiker__;
-    L.setConfig(c);
-    window.__run = L.start();
-  }, { ...FAST, baseDelay: 1000 });
-  await wait(200);
-  eq(await page2.evaluate(() => window.__mock.removeCard('rgl00001')), true, 'removed the pending card');
-  const res2 = await page2.evaluate(() => window.__run);
-  const m2 = await mockState(page2);
-  assert(!m2.clicks['rgl00001'], 'the removed recognition was never clicked');
-  eq(res2.stats.liked, 1, 'the remaining recognition was still liked');
-  assert(res2.stats.skipped >= 1, 'the vanished one was counted as skipped');
-  await page2.close();
-});
-
-test('10. Respects the maximum-likes limit', async () => {
-  const page = await openFeed({ cards: 20, pages: 0, likedEvery: 0, slow: 50 });
-  const res = await runToCompletion(page, { ...FAST, maxLikes: 5 });
-  const m = await mockState(page);
-
-  eq(res.reason, 'MAX_LIKES_REACHED', 'stopped for the max-likes reason');
-  eq(res.stats.liked, 5, 'liked exactly the configured maximum');
-  eq(m.totalClicks, 5, 'exactly five clicks were dispatched');
-  eq(m.unlikedLeft, 15, 'the rest were left untouched');
-  await page.close();
-});
-
-test('11. Diagnostic mode reports without clicking anything', async () => {
-  const page = await openFeed({ cards: 12, pages: 0, likedEvery: 3, slow: 50 });
-  const res = await runToCompletion(page, { ...FAST, diagnostic: true });
-  const m = await mockState(page);
-
-  eq(res.reason, 'DIAGNOSTIC', 'reported diagnostic mode');
-  eq(m.totalClicks, 0, 'diagnostic mode clicked nothing');
-  eq(res.report.unlikedCount, 8, 'counted 8 unliked recognitions');
-  eq(res.report.likedCount, 4, 'counted 4 liked recognitions');
-  assert(res.report.scrollContainerDescription.includes('feed-scroller'),
-    'found the real scroll container, not window: ' + res.report.scrollContainerDescription);
-  assert(res.report.sampleHrefs[0].includes('/recognitions/'), 'reported example hrefs');
-  assert(res.report.unlikedIds.length === 8 && /^[a-z0-9]+$/.test(res.report.unlikedIds[0]),
-    'extracted recognition ids');
-  assert(res.report.scrollHeight > res.report.viewportHeight, 'reported scroll and viewport heights');
-  await page.close();
-});
-
-test('12. Safety: hidden controls are not clicked and the scroll container is the feed', async () => {
-  const page = await openFeed({ cards: 12, pages: 0, likedEvery: 0, slow: 50, hidden: 1 });
-  const container = await page.evaluate(() => {
-    const el = window.__RecognizeAutoLiker__.detectScrollContainer(true);
-    return el === window ? 'window' : el.id;
+  check('popup on a Recognize tab enables the controls and shows live stats', async () => {
+    const status = {
+      available: true, state: 'RUNNING',
+      stats: { scanned: 12, alreadyLiked: 4, newLikes: 7, skipped: 1, errors: 0, currentRecognitionId: 'rglad2rn' }
+    };
+    const page = await openPopup('https://banglalink.recognizeapp.com/feed', { tabResponds: true, tabStatus: status });
+    eq(await page.textContent('#state'), 'RUNNING', 'state shown');
+    eq(await page.textContent('#s-scanned'), '12', 'scanned');
+    eq(await page.textContent('#s-already'), '4', 'already liked');
+    eq(await page.textContent('#s-liked'), '7', 'new likes');
+    eq(await page.textContent('#s-errors'), '0', 'errors');
+    eq(await page.textContent('#current'), 'rglad2rn', 'current recognition id');
+    eq(await page.getAttribute('#notice', 'hidden'), '', 'no warning notice');
+    eq(await page.isDisabled('#stop'), false, 'STOP is available');
+    await page.close();
   });
-  eq(container, 'feed-scroller', 'nearest scrollable ancestor detected (not window)');
 
-  const res = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
-  eq(res.stats.liked, 12, 'only the twelve visible recognitions were liked');
-  eq(m.forbiddenClicks.length, 0, 'no forbidden clicks');
-  const hiddenStillUnliked = await page.evaluate(() =>
-    !!document.querySelector('li[data-hidden-case] a.approval_link.unapproved'));
-  assert(hiddenStillUnliked, 'the display:none recognition was never clicked');
-  assert(res.reason === 'END_OF_FEED', 'still terminated cleanly despite an unreachable card: ' + res.reason);
-  await page.close();
-});
+  check('popup START / PAUSE / STOP send the right commands to the tab', async () => {
+    const status = { state: 'STOPPED', stats: {} };
+    const page = await openPopup('https://recognizeapp.com/feed', { tabResponds: true, tabStatus: status });
+    await page.click('#start');
+    await page.evaluate(() => { window.__tabStatus = { state: 'RUNNING', stats: {} }; });
+    await wait(150);
+    await page.click('#pause');
+    await wait(100);
+    await page.click('#stop');
+    await wait(100);
+    const commands = await page.evaluate(() =>
+      window.__msgs.filter((m) => m.type === 'RAL_COMMAND' && m.command !== 'STATUS').map((m) => m.command));
+    eq(commands.join(','), 'START,PAUSE,STOP', 'commands dispatched in order');
+    const targeted = await page.evaluate(() => window.__msgs.filter((m) => m.type === 'RAL_COMMAND').every((m) => m.to === 7));
+    eq(targeted, true, 'every command went to the active tab');
+    await page.close();
+  });
 
-test('13. Day-to-day idempotency: a second run never touches an existing like', async () => {
-  const page = await openFeed({ cards: 12, pages: 0, likedEvery: 3, slow: 50 });
+  check('popup refuses to act on a non-Recognize tab', async () => {
+    const page = await openPopup('https://example.com/', { tabResponds: false });
+    await wait(900);
+    eq(await page.getAttribute('#notice', 'hidden'), null, 'a notice is shown');
+    eq(await page.isDisabled('#start'), true, 'START is disabled');
+    const sent = await page.evaluate(() => window.__msgs.filter((m) => m.type === 'RAL_COMMAND' && m.command !== 'STATUS').length);
+    eq(sent, 0, 'no command was sent');
+    await page.close();
+  });
 
-  // ---- Day 1: 8 unliked get liked, 4 were already liked ----
-  const day1 = await runToCompletion(page, { ...FAST });
-  eq(day1.stats.liked, 8, 'day 1 liked the 8 unliked recognitions');
-  eq(day1.stats.alreadyLiked, 4, 'day 1 skipped the 4 already-liked ones');
-  const clicksAfterDay1 = (await mockState(page)).totalClicks;
-  const stateAfterDay1 = await page.evaluate(() => window.__mock.snapshot());
-  eq(Object.keys(stateAfterDay1).length, 12, 'all 12 recognitions present');
-  eq(Object.values(stateAfterDay1).every((v) => v.method === 'delete'), true,
-    'every recognition is now in the approved/delete state');
+  check('popup falls back to the cached status when the tab is unreachable', async () => {
+    const page = await openPopup('https://recognizeapp.com/feed', {
+      tabResponds: false,
+      cachedStatus: { state: 'WAITING', stalled: true, stats: { newLikes: 3, scanned: 9, alreadyLiked: 2, skipped: 0, errors: 0 } }
+    });
+    await wait(900);
+    eq(await page.textContent('#s-liked'), '3', 'cached stats rendered');
+    eq((await page.textContent('#state')).includes('throttled'), true, 'throttling is reported honestly');
+    await page.close();
+  });
 
-  // ---- Day 2: same feed, everything already approved ----
-  const day2 = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
-  const stateAfterDay2 = await page.evaluate(() => window.__mock.snapshot());
+  check('options page loads defaults, clears history and restores defaults', async () => {
+    const page = await browser.newPage();
+    await page.addInitScript(chromeStub('https://recognizeapp.com/', {
+      defaults: DEFAULTS,
+      settings: Object.assign({}, DEFAULTS, { clickDelay: 2500, minClickDelay: 400 }),
+      history: { rgl00001: { outcome: 'liked' }, rgl00002: { outcome: 'liked' } }
+    }));
+    await page.goto('file://' + path.join(ROOT, 'extension', 'options.html'));
+    await wait(250);
 
-  eq(day2.stats.liked, 0, 'day 2 liked nothing');
-  eq(day2.stats.alreadyLiked, 12, 'day 2 saw all 12 as already liked');
-  eq(day2.stats.failed, 0, 'day 2 recorded no failures');
-  eq(m.totalClicks, clicksAfterDay1, 'day 2 dispatched ZERO clicks');
-  assertNoLikesRemoved(m);
-  eq(JSON.stringify(stateAfterDay2), JSON.stringify(stateAfterDay1),
-    'the feed is byte-for-byte unchanged after day 2 (approval ids intact)');
-  eq(m.likedNow, 12, 'all 12 approvals survived the second run');
-  await page.close();
-});
+    eq(await page.inputValue('#clickDelay'), '2500', 'stored setting loaded');
+    eq(await page.inputValue('#minClickDelay'), '400', 'explicit min loaded');
+    eq(await page.inputValue('#maxClickDelay'), '', 'blank max stays blank (derived)');
+    eq((await page.textContent('#history-count')).includes('2'), true, 'history count shown');
 
-test('14. The +N total is never used as the current user\'s liked state', async () => {
-  const page = await openFeed({ cards: 12, pages: 0, likedEvery: 3, slow: 50 });
-  const before = await page.evaluate(() => window.__mock.snapshot());
+    await page.fill('#minClickDelay', '');
+    await page.dispatchEvent('#minClickDelay', 'change');
+    await wait(150);
+    const savedNull = await page.evaluate(() => window.__storage.settings.minClickDelay);
+    eq(savedNull, null, 'clearing an explicit delay stores null so it is derived again');
 
-  // The fixture is built so the count actively misleads:
-  eq(before['rgl00005'].text, '+7', 'rgl00005 is UNLIKED but shows a high +7');
-  eq(before['rgl00003'].text, '+2', 'rgl00003 is LIKED but shows a low +2');
-  eq(before['rgl0000b'].text, '+1', 'rgl0000b shows +1 yet is UNLIKED by this user');
-  eq(before['rgl00008'].text, '+',  'rgl00008 shows a bare + (zero total)');
-  // Same visible text, opposite required actions:
-  eq(before['rgl00004'].text, '+4', 'rgl00004 shows +4 and is UNLIKED');
-  eq(before['rgl00009'].text, '+4', 'rgl00009 shows the same +4 but IS LIKED');
-  eq(before['rgl00004'].method, 'post', 'rgl00004 offers post');
-  eq(before['rgl00009'].method, 'delete', 'rgl00009 offers delete');
+    await page.click('#clear-history');
+    await wait(150);
+    eq(await page.evaluate(() => Object.keys(window.__storage.history).length), 0, 'history cleared');
+    eq((await page.textContent('#history-count')).includes('0'), true, 'count refreshed');
 
-  const res = await runToCompletion(page, { ...FAST });
-  const m = await mockState(page);
-  const after = await page.evaluate(() => window.__mock.snapshot());
+    await page.click('#restore-defaults');
+    await wait(150);
+    eq(await page.inputValue('#clickDelay'), '1200', 'defaults restored');
+    await page.close();
+  });
 
-  assertNoLikesRemoved(m);
-  eq(res.stats.liked, 8, 'all 8 unliked recognitions were liked regardless of their counts');
-
-  // High count but unliked -> clicked.
-  eq(m.clicks['rgl00005'], 1, 'the "+7" unliked recognition was clicked');
-  eq(after['rgl00005'].text, '+8', 'its total went 7 -> 8');
-  // Text "+1" but unliked -> clicked.
-  eq(m.clicks['rgl0000b'], 1, 'the "+1" unliked recognition was clicked');
-  // Zero total -> clicked.
-  eq(m.clicks['rgl00008'], 1, 'the "+" (no likes yet) recognition was clicked');
-  // Low count but already liked -> untouched.
-  assert(!m.clicks['rgl00003'], 'the "+2" already-liked recognition was NOT clicked');
-  eq(after['rgl00003'].href, before['rgl00003'].href, 'its approval id is unchanged');
-  eq(after['rgl00003'].text, '+2', 'its total is unchanged');
-  // Identical "+4" text, opposite outcomes.
-  eq(m.clicks['rgl00004'], 1, 'the unliked "+4" was clicked');
-  assert(!m.clicks['rgl00009'], 'the liked "+4" was NOT clicked');
-  eq(after['rgl00009'].href, before['rgl00009'].href, 'the liked "+4" approval id is unchanged');
-  await page.close();
-});
-
-/* ------------------------------------------------------------------- main */
-(async () => {
-  browser = await chromium.launch({ headless: !HEADED });
-  const selected = ONLY.length
-    ? TESTS.filter((t) => ONLY.includes(parseInt(t.name, 10)))
-    : TESTS;
-
-  console.log('\nRecognize Auto Liker — test suite (' + selected.length + ' tests)\n');
-  let failures = 0;
-
-  for (const t of selected) {
-    const started = Date.now();
+  console.log('\nExtension UI wiring (popup / options with a stubbed chrome API)');
+  let failed = 0;
+  for (const r of results) {
     try {
-      await t.fn();
-      const ms = Date.now() - started;
-      console.log('  \x1b[32mPASS\x1b[0m  ' + t.name + '  \x1b[90m(' + ms + 'ms)\x1b[0m');
-      results.push({ name: t.name, ok: true });
-    } catch (err) {
-      failures++;
-      console.log('  \x1b[31mFAIL\x1b[0m  ' + t.name);
-      console.log('        ' + (err && err.message));
-      results.push({ name: t.name, ok: false, error: err && err.message });
+      await r.fn();
+      console.log('  \x1b[32mPASS\x1b[0m  ' + r.name);
+    } catch (e) {
+      failed++;
+      console.log('  \x1b[31mFAIL\x1b[0m  ' + r.name + '\n        ' + e.message);
     }
   }
+  return failed;
+}
 
+(async () => {
+  console.log('\nStatic safety checks');
+  const findings = staticChecks();
+  if (findings.length) {
+    findings.forEach((f) => console.log('  \x1b[31mFAIL\x1b[0m  ' + f));
+  } else {
+    console.log('  \x1b[32mPASS\x1b[0m  one gated .click(), no visibility gating, no credential/network surface, manifest intact');
+  }
+
+  const browser = await chromium.launch({ headless: !process.argv.includes('--headed') });
+  const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+  page.on('pageerror', (e) => console.log('  \x1b[31mpage error\x1b[0m ' + e.message));
+  await page.goto(RUNNER);
+  await page.waitForFunction(() => window.__testsDone === true, null, { timeout: 300000 });
+  const out = await page.evaluate(() => window.__testResults);
+  await page.close();
+  const uiFailed = await uiChecks(browser);
   await browser.close();
-  console.log('\n' + (results.length - failures) + '/' + results.length + ' passed\n');
-  process.exit(failures ? 1 : 0);
-})().catch(async (e) => {
-  console.error(e);
-  if (browser) await browser.close();
-  process.exit(1);
-});
+
+  console.log('\nBrowser suite (tests/mock/test-runner.html)');
+  out.results.forEach((r) => {
+    if (r.ok) console.log('  \x1b[32mPASS\x1b[0m  ' + r.name);
+    else console.log('  \x1b[31mFAIL\x1b[0m  ' + r.name + '\n        ' + r.error);
+  });
+
+  const failed = out.failed + findings.length + uiFailed;
+  console.log('\n' + (out.total - out.failed) + '/' + out.total + ' browser tests passed, ' +
+    findings.length + ' static findings, ' + uiFailed + ' UI wiring failures\n');
+  process.exit(failed ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });
