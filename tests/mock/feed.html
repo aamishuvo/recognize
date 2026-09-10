@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock RecognizeApp Feed</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif; background:#eef1f6; color:#22293a; }
+  header.topnav { position:sticky; top:0; background:#2a3346; color:#fff; padding:10px 16px; display:flex; gap:14px; align-items:center; z-index:5; }
+  header.topnav a { color:#cfe0ff; text-decoration:none; }
+  .layout { display:flex; gap:16px; padding:16px; height:calc(100vh - 44px); }
+  .sidebar { width:190px; flex:none; }
+  /* The feed is an inner scrollable container — window.scrollTo() would do nothing. */
+  #feed-scroller { flex:1; overflow-y:auto; background:#fff; border:1px solid #d6dbe6; border-radius:8px; padding:12px; }
+  ul#recognition-feed { list-style:none; margin:0; padding:0; }
+  li.recognition { border:1px solid #e2e6ef; border-radius:8px; padding:12px; margin-bottom:12px; }
+  li.recognition h3 { margin:0 0 4px; font-size:14px; }
+  .meta { font-size:12px; color:#66708a; margin-bottom:8px; }
+  .actions { display:flex; gap:10px; align-items:center; }
+  a.approval_link { display:inline-block; min-width:34px; text-align:center; padding:3px 9px; border-radius:5px;
+                    border:1px solid #b9c2d6; text-decoration:none; color:#22293a; background:#f5f7fb; font-weight:700; }
+  a.approval_link.approved { background:#2f8f5b; border-color:#2f8f5b; color:#fff; }
+  .loader { text-align:center; padding:14px; color:#66708a; font-style:italic; }
+  .end { text-align:center; padding:14px; color:#98a1b8; }
+</style>
+</head>
+<body>
+<header class="topnav">
+  <strong>RecognizeApp (mock)</strong>
+  <a href="/nav/home" id="decoy-nav">Home</a>
+  <a href="/nav/profile" class="profile_link" id="decoy-profile">My Profile</a>
+  <a href="/nav/recognitions/new" class="btn" id="decoy-create">Give Recognition</a>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <p>Sidebar decoys</p>
+    <!-- Same anchor class, WRONG category: must never be clicked. -->
+    <a class="approval_link unapproved btn" data-category="comment" data-event="liked"
+       data-remote="true" data-method="post" rel="nofollow"
+       href="/banglalink.net/comments/cmt00001/approvals?approvers_limit=5" id="decoy-comment-approval">+</a>
+    <!-- Right category, WRONG event. -->
+    <a class="approval_link unapproved btn" data-category="recognition" data-event="commented"
+       data-remote="true" data-method="post" rel="nofollow"
+       href="/banglalink.net/recognitions/decoyev1/approvals?approvers_limit=5" id="decoy-event">+</a>
+  </aside>
+
+  <main id="feed-scroller">
+    <ul id="recognition-feed"></ul>
+    <div class="loader" id="loader" hidden>Loading more recognitions…</div>
+    <div class="end" id="end-marker" hidden>You have reached the end of the feed.</div>
+  </main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var qs = new URLSearchParams(location.search);
+  function num(name, dflt) { var v = parseInt(qs.get(name), 10); return isFinite(v) ? v : dflt; }
+  function list(name) { return (qs.get(name) || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean); }
+
+  var CFG = {
+    cards:      num('cards', 20),      // initial recognition cards
+    pages:      num('pages', 2),       // extra dynamically loaded batches
+    perPage:    num('perPage', 6),     // cards per dynamic batch
+    likedEvery: num('likedEvery', 3),  // every Nth card starts already liked
+    slow:       num('slow', 120),      // ms before unapproved -> approved
+    loadDelay:  num('loadDelay', 500), // ms before a dynamic batch is inserted
+    hidden:     num('hidden', 0),      // add a display:none unliked card
+    failIds:    list('fail'),          // ids whose click never changes state
+    vanishIds:  list('vanish')         // ids whose card is removed on click
+  };
+
+  var feed = document.getElementById('recognition-feed');
+  var scroller = document.getElementById('feed-scroller');
+  var loader = document.getElementById('loader');
+  var endMarker = document.getElementById('end-marker');
+
+  var approvalSeq = 15052256;
+  var cardIndex = 0;
+  var pagesLoaded = 0;
+  var loading = false;
+
+  // ---- test instrumentation -------------------------------------------
+  var mock = {
+    cfg: CFG,
+    clicks: {},              // recognitionId -> click count
+    forbiddenClicks: [],     // anything we must never have clicked
+    approvedIds: [],
+    order: [],               // ids in click order
+    batchesLoaded: 0,
+    totalClicks: 0
+  };
+  window.__mock = mock;
+
+  function idFor(i) {
+    // Deterministic, RecognizeApp-shaped ids: 8 lowercase alphanumerics.
+    return ('rgl' + ('00000' + i.toString(36)).slice(-5)).slice(0, 8);
+  }
+
+  function makeCard(i) {
+    var id = idFor(i);
+    var startsLiked = CFG.likedEvery > 0 && (i % CFG.likedEvery === 0);
+    var behavior = CFG.failIds.indexOf(id) >= 0 ? 'fail'
+                 : CFG.vanishIds.indexOf(id) >= 0 ? 'vanish' : 'normal';
+
+    var li = document.createElement('li');
+    li.className = 'recognition';
+    li.setAttribute('data-recognition-id', id);
+    li.setAttribute('data-behavior', behavior);
+    li.innerHTML =
+      '<h3>Great work, Teammate #' + i + '</h3>' +
+      '<div class="meta">Recognition ' + id + ' &middot; Teamwork</div>' +
+      '<div class="actions">' +
+      '  <span class="vote text-nowrap"></span>' +
+      // Decoys inside the card: same-looking controls that must stay untouched.
+      '  <a class="approval_link unapproved btn" data-category="comment" data-event="liked"' +
+      '     data-remote="true" data-method="post" rel="nofollow"' +
+      '     href="/banglalink.net/comments/c' + id + '/approvals?approvers_limit=5">+</a>' +
+      '  <a class="comment_link" href="/banglalink.net/recognitions/' + id + '/comments">Comment</a>' +
+      '  <a class="profile_link" href="/banglalink.net/users/u' + i + '">Profile</a>' +
+      '</div>';
+
+    li.querySelector('.vote').appendChild(startsLiked ? likedAnchor(id) : unlikedAnchor(id));
+    return li;
+  }
+
+  function unlikedAnchor(id) {
+    var a = document.createElement('a');
+    a.className = 'approval_link unapproved btn';
+    a.setAttribute('data-sender', '');
+    a.setAttribute('data-category', 'recognition');
+    a.setAttribute('data-event', 'liked');
+    a.setAttribute('data-remote', 'true');
+    a.setAttribute('rel', 'nofollow');
+    a.setAttribute('data-method', 'post');
+    a.setAttribute('href', '/banglalink.net/recognitions/' + id + '/approvals?approvers_limit=5');
+    a.textContent = '+';
+    return a;
+  }
+
+  function likedAnchor(id) {
+    var a = document.createElement('a');
+    a.className = 'approval_link approved';
+    a.setAttribute('data-sender', 'app@recognizeapp.com');
+    a.setAttribute('data-category', 'recognition');
+    a.setAttribute('data-event', 'liked');
+    a.setAttribute('data-remote', 'true');
+    a.setAttribute('rel', 'nofollow');
+    a.setAttribute('data-method', 'delete');
+    a.setAttribute('href', '/banglalink.net/recognitions/' + id + '/approvals/' + (approvalSeq++) + '?approvers_limit=5');
+    a.textContent = '+1';
+    return a;
+  }
+
+  function addCards(n) {
+    var frag = document.createDocumentFragment();
+    for (var k = 0; k < n; k++) frag.appendChild(makeCard(++cardIndex));
+    feed.appendChild(frag);
+  }
+
+  // ---- click behaviour, mimicking the Rails UJS remote round-trip ------
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    e.preventDefault();
+
+    var isRecognitionApproval = a.classList.contains('approval_link') &&
+                                a.getAttribute('data-category') === 'recognition' &&
+                                a.getAttribute('data-event') === 'liked';
+
+    if (!isRecognitionApproval) {
+      // Anything else the automation touches is a safety violation.
+      mock.forbiddenClicks.push({
+        reason: 'non-recognition-approval',
+        id: a.id || null,
+        cls: a.className,
+        href: a.getAttribute('href')
+      });
+      return;
+    }
+
+    if (a.getAttribute('data-method') === 'delete' || a.classList.contains('approved')) {
+      mock.forbiddenClicks.push({ reason: 'clicked-already-approved', href: a.getAttribute('href') });
+      return;
+    }
+
+    var m = (a.getAttribute('href') || '').match(/\/recognitions\/([A-Za-z0-9_-]+)\/approvals/);
+    var id = m ? m[1] : null;
+    if (!id) return;
+
+    mock.clicks[id] = (mock.clicks[id] || 0) + 1;
+    mock.totalClicks++;
+    mock.order.push(id);
+
+    var card = a.closest('li.recognition');
+    var behavior = card ? card.getAttribute('data-behavior') : 'normal';
+
+    setTimeout(function () {
+      if (behavior === 'fail') return;                       // server "error": stays unapproved
+      if (behavior === 'vanish') { if (card) card.remove(); return; } // card removed mid-flight
+      var span = a.parentNode;
+      if (!span) return;
+      span.replaceChild(likedAnchor(id), a);                 // real app replaces the node
+      mock.approvedIds.push(id);
+    }, CFG.slow);
+  }, true);
+
+  // ---- infinite feed ---------------------------------------------------
+  function maybeLoadMore() {
+    if (loading || pagesLoaded >= CFG.pages) return;
+    if (scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 250) return;
+    loading = true;
+    loader.hidden = false;
+    setTimeout(function () {
+      addCards(CFG.perPage);
+      pagesLoaded++;
+      mock.batchesLoaded = pagesLoaded;
+      loading = false;
+      loader.hidden = true;
+      if (pagesLoaded >= CFG.pages) endMarker.hidden = false;
+    }, CFG.loadDelay);
+  }
+  scroller.addEventListener('scroll', maybeLoadMore, { passive: true });
+
+  // ---- boot ------------------------------------------------------------
+  addCards(CFG.cards);
+  if (CFG.hidden) {
+    var h = makeCard(++cardIndex);
+    h.style.display = 'none';
+    h.setAttribute('data-hidden-case', 'true');
+    feed.appendChild(h);
+  }
+  if (CFG.pages === 0) endMarker.hidden = false;
+
+  mock.removeCard = function (id) {
+    var el = feed.querySelector('li.recognition[data-recognition-id="' + id + '"]');
+    if (el) { el.remove(); return true; }
+    return false;
+  };
+  mock.unlikedCount = function () {
+    return document.querySelectorAll('a.approval_link.unapproved[data-category="recognition"][data-event="liked"][data-method="post"]').length;
+  };
+  mock.likedCount = function () {
+    return document.querySelectorAll('a.approval_link.approved[data-category="recognition"][data-event="liked"]').length;
+  };
+  mock.ready = true;
+})();
+</script>
+</body>
+</html>

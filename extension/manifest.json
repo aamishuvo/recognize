@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Recognize Auto Liker (local)",
+  "version": "1.0.0",
+  "description": "Adds a local control panel to RecognizeApp that likes recognition posts you have not liked yet. No login or credential handling.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.recognizeapp.com/*",
+        "https://recognizeapp.com/*"
+      ],
+      "js": ["core.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

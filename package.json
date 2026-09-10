@@ -1,0 +1,15 @@
+{
+  "name": "recognize-auto-liker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local browser automation that likes unliked RecognizeApp recognition posts. No login, credential, cookie or token handling.",
+  "scripts": {
+    "build": "node tools/build.cjs",
+    "test": "node tests/run-tests.cjs",
+    "test:headed": "node tests/run-tests.cjs --headed",
+    "mock": "http-server tests/mock -p 8080 -c-1"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.0"
+  }
+}
