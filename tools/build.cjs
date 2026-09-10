@@ -1,29 +1,34 @@
 #!/usr/bin/env node
 /**
- * Builds every distributable form of the engine from the single source of
- * truth: src/recognize-auto-liker.js
+ * Builds the standalone (non-extension) delivery forms.
+ *
+ * THE EXTENSION NEEDS NONE OF THIS. `extension/` is loadable as-is with no
+ * build step, no Node and no npm. This script only produces the fallback
+ * forms for machines where unpacked extensions are blocked by policy.
  *
  *   node tools/build.cjs
  *
- * Outputs:
- *   userscript/recognize-auto-liker.user.js   Tampermonkey userscript
- *   extension/core.js                         Unpacked-extension content script
- *   dist/console-snippet.js                   Paste-into-DevTools version
- *   dist/bookmarklet.txt                      One-line javascript: bookmarklet
+ * Both outputs are the SAME engine the extension runs
+ * (extension/content/engine.js) plus a floating-panel host, so there is
+ * exactly one implementation of the click-safety gate in this repository.
  */
 'use strict';
 const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const core = fs.readFileSync(path.join(ROOT, 'src', 'recognize-auto-liker.js'), 'utf8');
-const version = (core.match(/var VERSION = '([^']+)'/) || [, '0.0.0'])[1];
+const engine = fs.readFileSync(path.join(ROOT, 'extension', 'content', 'engine.js'), 'utf8');
+const panel = fs.readFileSync(path.join(ROOT, 'src', 'standalone-panel.js'), 'utf8');
+const version = (engine.match(/var VERSION = '([^']+)'/) || [, '0.0.0'])[1];
 
 const BANNER = [
   '/* GENERATED FILE — do not edit.',
-  '   Source: src/recognize-auto-liker.js   Build: node tools/build.cjs */',
+  '   Sources: extension/content/engine.js + src/standalone-panel.js',
+  '   Rebuild: node tools/build.cjs */',
   ''
 ].join('\n');
+
+const combined = BANNER + engine + '\n' + panel;
 
 function write(rel, content) {
   const abs = path.join(ROOT, rel);
@@ -32,13 +37,12 @@ function write(rel, content) {
   console.log('  wrote ' + rel + '  (' + Math.round(content.length / 1024) + ' KB)');
 }
 
-/* ------------------------------------------------------- 1. userscript */
-const userscript = [
+write('userscript/recognize-auto-liker.user.js', [
   '// ==UserScript==',
   '// @name         Recognize Auto Liker',
   '// @namespace    local.recognize.autoliker',
   '// @version      ' + version,
-  '// @description  Likes RecognizeApp recognition posts you have not liked yet. No login/credential handling.',
+  '// @description  Likes RecognizeApp recognitions you have not liked yet. Never removes an existing like.',
   '// @author       local',
   '// @match        https://*.recognizeapp.com/*',
   '// @match        https://recognizeapp.com/*',
@@ -47,21 +51,13 @@ const userscript = [
   '// @noframes',
   '// ==/UserScript==',
   '',
-  BANNER,
-  core
-].join('\n');
-write('userscript/recognize-auto-liker.user.js', userscript);
+  combined
+].join('\n'));
 
-/* ------------------------------------------- 2. unpacked extension core */
-write('extension/core.js', BANNER + core);
+write('dist/console-snippet.js', combined);
 
-/* --------------------------------------------------- 3. console snippet */
-write('dist/console-snippet.js', BANNER + core);
+write('dist/bookmarklet.txt', 'javascript:' + encodeURIComponent(
+  '(function(){try{' + engine + '\n' + panel + '}catch(e){alert("Recognize Auto Liker failed to load: "+e.message);}})();'
+) + '\n');
 
-/* ------------------------------------------------------- 4. bookmarklet */
-const bookmarklet = 'javascript:' + encodeURIComponent(
-  '(function(){try{' + core + '}catch(e){alert("Recognize Auto Liker failed to load: "+e.message);}})();'
-);
-write('dist/bookmarklet.txt', bookmarklet + '\n');
-
-console.log('\nBuilt v' + version + '.\n');
+console.log('\nBuilt standalone fallbacks v' + version + '. The extension is unaffected.\n');
