@@ -25,6 +25,17 @@ chrome://extensions → Developer mode চালু → Load unpacked → `exten
 
 ### খ) বিকল্প — যদি unpacked এক্সটেনশন ব্লক থাকে
 
+> **`Extension installation is blocked by policy` দেখাচ্ছে?** এটি আপনার অফিসের Chrome
+> পলিসি, এবং এখানকার কিছুই সেটি বাইপাস করার চেষ্টা করে না। নিচের console snippet
+> ব্যবহার করুন — এটি একই ইঞ্জিন, এক্সটেনশন নয়, এবং একই টেস্ট স্যুটে যাচাই করা।
+> কোন পলিসি দায়ী দেখতে `chrome://policy` খুলে `ExtensionInstallBlocklist` /
+> `ExtensionSettings` খুঁজুন।
+>
+> **দ্রুততম পথ:** Recognize ফিড খুলুন → `F12` → **Console** → Chrome চাইলে
+> `allow pasting` লিখে Enter → `dist/console-snippet.js`-এর **পুরোটা** পেস্ট করে Enter।
+> ডানদিকে উপরে একটি কন্ট্রোল প্যানেল আসবে। আগে **RUN DIAGNOSTIC** চাপুন, তারপর
+> *Max new likes* ৩–৫ দিয়ে **START**। থামাতে `Esc`। পেজ রিলোড করলে আবার পেস্ট করতে হবে।
+
 কিছু অফিসের Chrome পলিসি Developer mode বন্ধ রাখে। সেক্ষেত্রে একই ইঞ্জিন এই তিন রূপেও আছে:
 
 | ফাইল | ব্যবহার |
@@ -37,6 +48,19 @@ chrome://extensions → Developer mode চালু → Load unpacked → `exten
 তৈরি** (`node tools/build.cjs`), তাই ক্লিক-নিরাপত্তার নিয়ম পুরো রিপোতে **একটাই জায়গায়** আছে।
 
 কোনো পদ্ধতিই অ্যাডমিন রেস্ট্রিকশন বাইপাস করে না। সব পথ বন্ধ থাকলে সঠিক কাজ হলো IT-কে বলা।
+
+### গ) iPhone / iOS Safari — অ্যাপ বা এক্সটেনশন ছাড়াই
+
+আইফোন থেকেও চালানো যায় — Safari-র **Run JavaScript on Web Page** Shortcut অ্যাকশন দিয়ে।
+[`iphone-safari/generator.html`](iphone-safari/generator.html) খুলে **Copy JavaScript**
+চাপুন, Shortcut-এ পেস্ট করুন, তারপর Recognize ফিডে Share → Shortcut চালিয়ে নিচে আসা
+প্যানেলে **START** চাপুন।
+
+**→ পূর্ণ নির্দেশিকা: [`iphone-safari/README.md`](iphone-safari/README.md)** ·
+ধাপে ধাপে Shortcut বানানো: [`iphone-safari/shortcut-guide.md`](iphone-safari/shortcut-guide.md)
+
+**সৎ কথা:** iOS স্ক্রিনে না থাকা পেজ suspend করে দেয়, তাই এটি ব্যাকগ্রাউন্ডে চলতে পারে
+না — এবং সেই দাবিও করা হয়নি। চলার সময় Safari ট্যাবটি খোলা ও স্ক্রিনে রাখুন।
 
 ---
 

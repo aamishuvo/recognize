@@ -25,6 +25,18 @@ privacy, background/minimised behaviour, troubleshooting, limitations.
 
 ### 2. Standalone fallback — when unpacked extensions are blocked
 
+> **Seeing `Extension installation is blocked by policy`?** That is your organisation's
+> Chrome policy, and nothing here tries to override it. Use the console snippet below —
+> it is the same engine, is not an extension, and is covered by the same tests. To see
+> which policy is responsible, open `chrome://policy` and look for
+> `ExtensionInstallBlocklist` / `ExtensionSettings`.
+>
+> **Quickest path:** open your Recognize feed → `F12` → **Console** → type
+> `allow pasting` + Enter if Chrome asks → paste all of `dist/console-snippet.js` →
+> Enter. A control panel appears at the top right. Press **RUN DIAGNOSTIC** first, then
+> set *Max new likes* to 3–5 and press **START**. `Esc` stops it. Re-paste after a page
+> reload.
+
 Some corporate Chrome policies disable Developer mode. The same engine is also built into
 a userscript, a console snippet and a bookmarklet:
 
@@ -40,6 +52,19 @@ the click-safety gate in this repository.
 
 Nothing here circumvents an administrator restriction. If policy blocks every route, the
 answer is to ask IT.
+
+### 3. iPhone / iOS Safari — no app, no extension
+
+Run it from an iPhone through a Shortcut, using Safari's **Run JavaScript on Web Page**
+action. Open [`iphone-safari/generator.html`](iphone-safari/generator.html), tap
+**Copy JavaScript**, paste it into the Shortcut, then run the Shortcut from Safari's
+Share sheet on your Recognize feed and press **START** in the panel that appears.
+
+**→ Full guide: [`iphone-safari/README.md`](iphone-safari/README.md)** ·
+step-by-step Shortcut setup: [`iphone-safari/shortcut-guide.md`](iphone-safari/shortcut-guide.md)
+
+iOS suspends pages that are not on screen, so this cannot run in the background and does
+not claim to — keep the tab visible while it runs.
 
 ---
 
@@ -118,6 +143,11 @@ a stubbed `chrome` API.
 
 `tests/mock/feed.html` is a browsable mock feed for poking at by hand.
 
+The iPhone feature has its own 18-test suite at
+[`iphone-safari/tests/mock-recognize.html`](iphone-safari/tests/mock-recognize.html),
+also tooling-free, which runs the generated script and includes its own Day 1 / Day 2
+idempotency test. `node tests/run-tests.cjs` runs it too, at a 390×844 touch viewport.
+
 ---
 
 ## Project layout
@@ -139,9 +169,20 @@ tests/mock/test-runner.html The 20-test suite — open it in any browser
 tests/mock/feed.html       Browsable mock feed
 tests/run-tests.cjs        Headless wrapper + static and UI checks (dev-only)
 
+iphone-safari/          iPhone / iOS Safari feature
+  generator.html        Copy / download the script, with the Shortcut guide inline
+  recognize-auto-liker.ios.js  Generated self-contained script for the Shortcut
+  src/ios-panel.js      iOS host: mobile panel + Shortcuts completion() handling
+  tests/mock-recognize.html    18-test suite — open in any browser, phone included
+  README.md  shortcut-guide.md
+
 tools/build.cjs         Rebuilds the standalone fallbacks from the engine
+tools/build-ios.cjs     Rebuilds the iPhone feature (writes only into iphone-safari/)
 tools/make-icons.cjs    Regenerates the PNG icons (dev-only)
 ```
+
+All four delivery forms are built from the one engine in
+`extension/content/engine.js`, so the click-safety gate exists in exactly one place.
 
 Documentation in Bangla: [`README.bn.md`](README.bn.md).
 
