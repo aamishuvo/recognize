@@ -49,6 +49,19 @@ chrome://extensions → Developer mode চালু → Load unpacked → `exten
 
 কোনো পদ্ধতিই অ্যাডমিন রেস্ট্রিকশন বাইপাস করে না। সব পথ বন্ধ থাকলে সঠিক কাজ হলো IT-কে বলা।
 
+### গ) iPhone / iOS Safari — অ্যাপ বা এক্সটেনশন ছাড়াই
+
+আইফোন থেকেও চালানো যায় — Safari-র **Run JavaScript on Web Page** Shortcut অ্যাকশন দিয়ে।
+[`iphone-safari/generator.html`](iphone-safari/generator.html) খুলে **Copy JavaScript**
+চাপুন, Shortcut-এ পেস্ট করুন, তারপর Recognize ফিডে Share → Shortcut চালিয়ে নিচে আসা
+প্যানেলে **START** চাপুন।
+
+**→ পূর্ণ নির্দেশিকা: [`iphone-safari/README.md`](iphone-safari/README.md)** ·
+ধাপে ধাপে Shortcut বানানো: [`iphone-safari/shortcut-guide.md`](iphone-safari/shortcut-guide.md)
+
+**সৎ কথা:** iOS স্ক্রিনে না থাকা পেজ suspend করে দেয়, তাই এটি ব্যাকগ্রাউন্ডে চলতে পারে
+না — এবং সেই দাবিও করা হয়নি। চলার সময় Safari ট্যাবটি খোলা ও স্ক্রিনে রাখুন।
+
 ---
 
 ## ২. ইনস্টল (Windows, অ্যাডমিন লাগে না)

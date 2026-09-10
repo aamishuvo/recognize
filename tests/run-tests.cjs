@@ -116,6 +116,51 @@ function staticChecks() {
     if (!fs.existsSync(path.join(ROOT, 'extension', rel))) findings.push(`manifest references missing file: ${rel}`);
   }
 
+  // ---- iPhone / Safari feature (additive; the checks above are unchanged) ----
+  const iosScriptPath = path.join(ROOT, 'iphone-safari', 'recognize-auto-liker.ios.js');
+  if (!fs.existsSync(iosScriptPath)) {
+    findings.push('iphone-safari/recognize-auto-liker.ios.js is missing (run: node tools/build-ios.cjs)');
+  } else {
+    const ios = fs.readFileSync(iosScriptPath, 'utf8');
+    const iosCode = stripComments(ios);
+
+    // Self-contained and safe for Safari's Run JavaScript on Web Page.
+    for (const bad of ['chrome.runtime', 'chrome.storage', 'chrome.tabs', 'localStorage',
+      'sessionStorage', 'indexedDB', 'XMLHttpRequest', 'document.cookie',
+      'navigator.credentials', 'importScripts', 'require(']) {
+      if (iosCode.includes(bad)) findings.push(`iOS script uses ${bad}; it must be self-contained and store nothing`);
+    }
+    if (/\bfetch\s*\(/.test(iosCode)) findings.push('iOS script calls fetch()');
+    if (/src\s*=\s*["']https?:/.test(iosCode)) findings.push('iOS script loads an external resource');
+
+    // The same single gated click as everywhere else.
+    const iosClicks = iosCode.match(/\.click\(\)/g) || [];
+    if (iosClicks.length !== 1) findings.push(`iOS script has ${iosClicks.length} .click() calls in code; exactly 1 is allowed`);
+
+    // It must carry the CURRENT gate, not a stale copy.
+    const gate = engine.slice(engine.indexOf('function safetyCheck'), engine.indexOf('function recognitionIdOf'));
+    if (!ios.includes(gate)) findings.push('iOS script carries a stale safety gate (run: node tools/build-ios.cjs)');
+
+    // It must release the Shortcut rather than hanging it.
+    if (!iosCode.includes('completion(')) findings.push('iOS script never calls completion(); the Shortcut would hang');
+
+    for (const rel of ['iphone-safari/generator.html', 'iphone-safari/README.md',
+      'iphone-safari/shortcut-guide.md', 'iphone-safari/tests/mock-recognize.html',
+      'iphone-safari/src/ios-panel.js']) {
+      if (!fs.existsSync(path.join(ROOT, rel))) findings.push(`missing iPhone feature file: ${rel}`);
+    }
+  }
+
+  // ---- the additive feature must not have disturbed anything existing ----
+  for (const rel of ['extension/manifest.json', 'extension/background.js', 'extension/popup.js',
+    'extension/options.js', 'extension/content/engine.js', 'extension/content/content.js',
+    'src/standalone-panel.js', 'tools/build.cjs', 'tools/make-icons.cjs',
+    'dist/console-snippet.js', 'dist/bookmarklet.txt',
+    'userscript/recognize-auto-liker.user.js', 'tests/mock/feed.html',
+    'tests/mock/mock-feed.js', 'tests/mock/test-runner.html']) {
+    if (!fs.existsSync(path.join(ROOT, rel))) findings.push(`pre-existing file went missing: ${rel}`);
+  }
+
   return findings;
 }
 
@@ -401,6 +446,23 @@ async function standaloneChecks(browser) {
   await page.close();
   const uiFailed = await uiChecks(browser);
   const standaloneFailed = await standaloneChecks(browser);
+
+  // iPhone / Safari suite — the same HTML file a user opens on their phone.
+  const iosPage = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const iosErrors = [];
+  iosPage.on('pageerror', (e) => iosErrors.push(e.message));
+  await iosPage.goto('file://' + path.join(ROOT, 'iphone-safari', 'tests', 'mock-recognize.html'));
+  await iosPage.waitForFunction(() => window.__testsDone === true, null, { timeout: 300000 });
+  const iosOut = await iosPage.evaluate(() => window.__testResults);
+  await iosPage.close();
+
+  console.log('\niPhone / Safari suite (iphone-safari/tests/mock-recognize.html, 390x844 touch)');
+  iosOut.results.forEach((r) => {
+    if (r.ok) console.log('  \x1b[32mPASS\x1b[0m  ' + r.name);
+    else console.log('  \x1b[31mFAIL\x1b[0m  ' + r.name + '\n        ' + r.error);
+  });
+  iosErrors.forEach((e) => console.log('  \x1b[31mpage error\x1b[0m ' + e));
+
   await browser.close();
 
   console.log('\nBrowser suite (tests/mock/test-runner.html)');
@@ -409,8 +471,9 @@ async function standaloneChecks(browser) {
     else console.log('  \x1b[31mFAIL\x1b[0m  ' + r.name + '\n        ' + r.error);
   });
 
-  const failed = out.failed + findings.length + uiFailed + standaloneFailed;
+  const failed = out.failed + findings.length + uiFailed + standaloneFailed + iosOut.failed + iosErrors.length;
   console.log('\n' + (out.total - out.failed) + '/' + out.total + ' browser tests passed, ' +
+    (iosOut.total - iosOut.failed) + '/' + iosOut.total + ' iPhone tests passed, ' +
     findings.length + ' static findings, ' + uiFailed + ' UI wiring failures, ' +
     standaloneFailed + ' standalone failures\n');
   process.exit(failed ? 1 : 0);

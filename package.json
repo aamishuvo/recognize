@@ -7,7 +7,8 @@
     "test": "node tests/run-tests.cjs",
     "test:headed": "node tests/run-tests.cjs --headed",
     "build": "node tools/build.cjs",
-    "icons": "node tools/make-icons.cjs"
+    "icons": "node tools/make-icons.cjs",
+    "build:ios": "node tools/build-ios.cjs"
   },
   "devDependencies": {
     "playwright": "^1.56.0"
