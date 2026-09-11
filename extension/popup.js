@@ -203,17 +203,26 @@ function renderPageProgress(status) {
     // The search is a handful of page loads; show it narrowing.
     $('page-info').textContent =
       `searching ${run.seek.lo}–${run.seek.hi} (step ${run.seek.steps})`;
+  } else if (run && run.active) {
+    $('page-info').textContent =
+      `${where} · ${run.totals.newLikes} liked over ${run.pagesDone} page(s)`;
+  } else if (run && run.furthestPage) {
+    $('page-info').textContent = `${where} · reached page ${run.furthestPage}`;
   } else {
-    $('page-info').textContent = run && run.active
-      ? `${where} · ${run.totals.newLikes} liked over ${run.pagesDone} page(s)`
-      : where;
+    $('page-info').textContent = where;
   }
 
-  const resumeAt = run && !run.active ? run.resumeAt : null;
-  if (resumeAt && resumeAt !== info.current) {
+  // Show the resume point whenever there is one — including while a run is
+  // still marked active. If the tab hung mid-run, that is exactly when this
+  // number matters most, and hiding it until a clean stop made it unreachable.
+  const resumeAt = run ? (run.resumeAt || run.furthestPage) : null;
+  if (resumeAt) {
     resumeBtn.hidden = false;
     resumeBtn.dataset.page = resumeAt;
-    resumeBtn.textContent = `Resume from page ${resumeAt}`;
+    resumeBtn.textContent = run.active && resumeAt === info.current
+      ? `Restart from page ${resumeAt}`
+      : `Resume from page ${resumeAt}`;
+    resumeBtn.title = `Furthest page reached: ${run.furthestPage || resumeAt}`;
   } else {
     resumeBtn.hidden = true;
   }

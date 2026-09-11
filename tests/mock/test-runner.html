@@ -1012,6 +1012,94 @@
     eq(h.navigations.length, hops, 'resuming after STOP navigates nowhere');
   });
 
+  test('41. Page mode stays on its page when the site keeps lazy-loading', async function () {
+    // The real failure: opening ?page=122 still leaves the grid's infinite
+    // scroll armed, so anything that scrolls pulls 123, 124 ... in. The run
+    // then never finishes "this page", never navigates, and silently becomes
+    // the infinite scroll page mode exists to avoid.
+    var initial = [];
+    for (var i = 0; i < 6; i++) initial.push({ id: ID(8000 + i), liked: false, count: 1 });
+    var batches = [];
+    for (var b = 0; b < 4; b++) {
+      var page = [];
+      for (var j = 0; j < 6; j++) page.push({ id: ID(8100 + b * 6 + j), liked: false, count: 2 });
+      batches.push(page);
+    }
+
+    var s = setup({ cards: initial, batches: batches, loadDelay: 80, height: 200 }, {
+      scrollForMore: false, limitToInitialSet: true,
+      scrollIntoViewBeforeClick: false, pruneProcessedCards: false
+    });
+    var r = await s.engine.start();
+
+    eq(r.reason, 'PAGE_DONE', 'the page finished and handed back');
+    eq(r.stats.newLikes, 6, 'it liked exactly the six this page came with');
+    eq(s.mock.batchesLoaded, 0, 'and never woke the lazy loader');
+    for (var k = 0; k < 24; k++) {
+      assert(!s.mock.clicks[ID(8100 + k)], 'nothing from a later page was touched');
+    }
+    assertNoDamage(s.mock);
+  });
+
+  test('42. Without the guard it runs away, which is what page mode must prevent', async function () {
+    // Same feed, guard off: prove the guard is what stops the runaway rather
+    // than the fixture quietly making it impossible.
+    var initial = [];
+    for (var i = 0; i < 6; i++) initial.push({ id: ID(8500 + i), liked: false, count: 1 });
+    var batches = [];
+    for (var b = 0; b < 4; b++) {
+      var page = [];
+      for (var j = 0; j < 6; j++) page.push({ id: ID(8600 + b * 6 + j), liked: false, count: 2 });
+      batches.push(page);
+    }
+
+    var s = setup({ cards: initial, batches: batches, loadDelay: 80, height: 200 }, {
+      scrollForMore: false, limitToInitialSet: false,
+      scrollIntoViewBeforeClick: true, pruneProcessedCards: false
+    });
+    var r = await s.engine.start();
+
+    assert(r.stats.newLikes > 6,
+      'unguarded, it swallowed pages it should have navigated to (' + r.stats.newLikes + ')');
+    assertNoDamage(s.mock);
+  });
+
+  test('43. The page number is recorded before any work, so a hang leaves it usable', async function () {
+    var h = runnerHarness({ startPage: 122, likesPerPage: function () { return 2; } });
+    var writes = [];
+    var realSet = h.store;
+    // Watch what is in storage the moment the engine is asked to work.
+    var seenAtWorkTime = null;
+    var h2 = (function () {
+      var page = 122;
+      var store = { value: null };
+      var f = paginationFixture(page, { next: page + 1 });
+      var runner = PAGES.createPageRunner({
+        get doc() { return f.doc; },
+        get win() { return f.win; },
+        storage: {
+          get: function () { return Promise.resolve(store.value); },
+          set: function (v) { store.value = JSON.parse(JSON.stringify(v)); writes.push(store.value); return Promise.resolve(); }
+        },
+        navigate: function (url) { page = PAGES.pageOf(url); f = paginationFixture(page, { next: page + 1 }); },
+        countUnliked: function () { return 3; },
+        runEngine: function () {
+          // This is the moment a hang would freeze everything.
+          seenAtWorkTime = store.value ? { page: store.value.currentPage, resumeAt: store.value.resumeAt } : null;
+          return Promise.resolve({ reason: 'PAGE_DONE', stats: { newLikes: 1, alreadyLiked: 5, scanned: 6 } });
+        }
+      });
+      return { runner: runner, store: store };
+    })();
+
+    await h2.runner.start({ maxLikesPerRun: 50, stopAfterEmptyPages: 5 });
+
+    assert(!!seenAtWorkTime, 'storage held a run while the page was being worked');
+    eq(seenAtWorkTime.page, 122, 'the current page was written down BEFORE the work started');
+    eq(seenAtWorkTime.resumeAt, 122, 'and it is the number to restart from');
+    eq(h2.store.value.furthestPage >= 122, true, 'the furthest page reached is tracked');
+  });
+
   /* =================================================================== */
   /* BACKGROUND-TAB CATCH-UP                                              */
   /* =================================================================== */

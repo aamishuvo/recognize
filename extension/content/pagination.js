@@ -148,6 +148,8 @@
       return {
         active: true,
         mode: 'run',
+        currentPage: null,
+        furthestPage: null,
         startedAt: Date.now(),
         page: parsePageInfo(doc(), win()).current,
         pagesDone: 0,
@@ -280,6 +282,11 @@
         }
 
         var here = parsePageInfo(doc(), win()).current;
+        // Write down where we are BEFORE doing any work. If the tab hangs or is
+        // closed mid-page, this is the number to restart from.
+        state.currentPage = here;
+        state.furthestPage = Math.max(state.furthestPage || 0, here);
+        state.resumeAt = here;
         if (state.page !== here) {
           // The user navigated somewhere else themselves. Adopt where they are
           // rather than yanking the browser back, but keep the totals.
@@ -307,10 +314,21 @@
     }
 
     function workThisPage(state) {
+      var at = parsePageInfo(doc(), win()).current;
+      state.currentPage = at;
+      state.furthestPage = Math.max(state.furthestPage || 0, at);
+      state.resumeAt = at;
+      storage.set(state);          // fire and forget: survives a hang mid-page
+
       var pageSettings = {};
       Object.keys(state.settings || {}).forEach(function (k) { pageSettings[k] = state.settings[k]; });
       pageSettings.scrollForMore = false;          // one page at a time
       pageSettings.stopAfterConsecutiveAlreadyLiked = 0;   // meaningless per page
+      pageSettings.limitToInitialSet = true;       // ignore anything the loader appends
+      // Nothing may scroll: a scroll wakes the site's infinite loader and pulls
+      // the following pages in, which is exactly what page mode exists to avoid.
+      pageSettings.scrollIntoViewBeforeClick = false;
+      pageSettings.pruneProcessedCards = false;    // pages are small; nothing to prune
 
       // Whatever is left of the overall like budget.
       var budget = state.settings.maxLikesPerRun;

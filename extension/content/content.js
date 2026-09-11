@@ -227,6 +227,7 @@
       '<div class="r"><span class="dot" id="d"></span><span id="s">STOPPED</span></div>' +
       '<div class="n"><span>New likes</span><span id="l">0</span></div>' +
       '<div class="n"><span>Already liked</span><span id="a">0</span></div>' +
+      '<div class="n"><span>Page</span><span id="p">&ndash;</span></div>' +
       '<button id="x">STOP</button>' +
       '<div class="h">Esc = emergency stop</div>';
     shadow.appendChild(style);
@@ -234,7 +235,7 @@
     document.documentElement.appendChild(badge);
 
     var q = function (id) { return shadow.getElementById ? shadow.getElementById(id) : shadow.querySelector('#' + id); };
-    badgeEls = { dot: q('d'), state: q('s'), likes: q('l'), already: q('a'), stop: q('x') };
+    badgeEls = { dot: q('d'), state: q('s'), likes: q('l'), already: q('a'), page: q('p'), stop: q('x') };
     badgeEls.stop.addEventListener('click', function () {
       if (engine) engine.stop('on-page STOP button');
     });
@@ -250,6 +251,14 @@
     badgeEls.state.textContent = snap.state;
     badgeEls.likes.textContent = snap.stats.newLikes;
     badgeEls.already.textContent = snap.stats.alreadyLiked;
+    // On the page itself, so the number is readable even if the tab locks up
+    // and the popup will not open.
+    if (badgeEls.page) {
+      var info = PAGES ? PAGES.parsePageInfo(document, window) : null;
+      badgeEls.page.textContent = info && info.paginated
+        ? String(info.current) + (info.last ? ' / ' + info.last : '')
+        : '–';
+    }
   }
 
   /* ------------------------------------------------------- emergency stop */

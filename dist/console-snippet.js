@@ -98,6 +98,17 @@
      */
     scrollForMore: true,
     /*
+     * Page mode only. The grid keeps its infinite scroll alive even when a
+     * ?page=N URL is opened, so anything that scrolls - including bringing a
+     * card into view before clicking it - wakes the loader and drags the next
+     * pages in. The run then never finishes "this page", never navigates, and
+     * quietly turns back into the infinite scroll we were trying to escape.
+     * With this on, only recognitions present when the page was opened are
+     * ever processed; anything appended later belongs to a page we will
+     * navigate to properly.
+     */
+    limitToInitialSet: false,
+    /*
      * THE ANSWER TO "THE PAGE HANGS WHILE IT LOADS".
      * An infinite feed never throws anything away, so after a couple of thousand
      * cards the tab is holding thousands of avatars and DOM nodes and Chrome
@@ -239,6 +250,7 @@
 
     var stats = blankStats();
     var consecutiveAlready = 0;   // already-liked met back to back, in feed order
+    var initialIds = null;        // page mode: the recognitions this page came with
     var emptyScans = 0;           // consecutive scans with nothing to like
     var scrollContainer = null;
     var observer = null;
@@ -653,6 +665,8 @@
       links.forEach(function (a) {
         var id = recognitionIdOf(a);
         if (!id) return;
+        // Appended by the site's own lazy loader after we arrived: not ours.
+        if (initialIds && !initialIds.has(id)) return;
         var isNew = !seen.has(id);
         if (isNew) { seen.add(id); stats.scanned++; }
         if (processed.has(id)) return;
@@ -1121,6 +1135,17 @@
       if (overrides) updateSettings(overrides);
       reset();
       stopRequested = false;
+
+      initialIds = null;
+      if (settings.limitToInitialSet) {
+        initialIds = new Set();
+        queryAll(SELECTORS.ANY).forEach(function (a) {
+          var id = recognitionIdOf(a);
+          if (id) initialIds.add(id);
+        });
+        log('Page mode: working the ' + initialIds.size + ' recognition(s) this page came with');
+      }
+
       stats.startedAt = Date.now();
       setState(STATE.RUNNING);
       startObserver();
