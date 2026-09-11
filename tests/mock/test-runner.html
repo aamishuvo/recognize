@@ -808,6 +808,37 @@
     };
   }
 
+  test('35b. Pagination hidden by the site\'s CSS is still usable', function () {
+    // Infinite-scroll scripts commonly render the pagination and then hide it,
+    // so "there are no page numbers at the bottom" says nothing about whether
+    // the pages exist. querySelector does not care about visibility, and
+    // neither should we.
+    var holder = document.createElement('div');
+    stage.appendChild(holder);
+    holder.innerHTML =
+      '<style>.hidden-pag{display:none}</style>' +
+      '<div class="pagination hidden-pag">' +
+      '  <a href="' + REAL_URL + '&page=2">2</a>' +
+      '  <a href="' + REAL_URL + '&page=1792">1792</a>' +
+      '  <a class="next_page" href="' + REAL_URL + '&page=73">Next</a>' +
+      '</div>';
+
+    var pag = holder.querySelector('.pagination');
+    eq(getComputedStyle(pag).display, 'none', 'the pagination really is hidden from view');
+
+    var fakeWin = { location: { href: REAL_URL } };
+    var fakeDoc = {
+      querySelector: function (sel) { return holder.querySelector(sel); },
+      querySelectorAll: function (sel) { return holder.querySelectorAll(sel); },
+      location: { href: REAL_URL }
+    };
+    var info = PAGES.parsePageInfo(fakeDoc, fakeWin);
+    eq(info.paginated, true, 'it is still recognised as paginated');
+    eq(info.next, 73, 'the next page is still read');
+    eq(info.last, 1792, 'the last page is still read');
+    assert(info.nextUrl.indexOf('filter_by') >= 0, 'and the filters still survive');
+  });
+
   test('36. Walks page to page, carrying totals across each navigation', async function () {
     var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 3; } });
     await h.runner.start({ maxLikesPerRun: 12, stopAfterEmptyPages: 5 });

@@ -108,6 +108,49 @@
                           nav.paginationContainers.length);
   out.feedNavigation = nav;
 
+  /* --------------------------- what the auto-liker would actually decide */
+  // The pagination block is very often present but hidden once infinite scroll
+  // takes over, so "I can't see page numbers" says nothing about whether
+  // jumping works. This reports what the code sees, not what the eye sees.
+  var pagBlock = document.querySelector('.pagination, .pager');
+  var nextLink = document.querySelector('a.next_page[href], a[rel="next"][href]');
+
+  function visibility(el) {
+    if (!el) return '(not in the page at all)';
+    var cs = getComputedStyle(el);
+    var r = el.getBoundingClientRect();
+    var hidden = cs.display === 'none' || cs.visibility === 'hidden' ||
+                 parseFloat(cs.opacity) === 0 || (r.width === 0 && r.height === 0);
+    return hidden
+      ? 'IN THE PAGE but hidden from view (display:' + cs.display + ', visibility:' +
+        cs.visibility + ', size ' + Math.round(r.width) + 'x' + Math.round(r.height) + ')'
+      : 'in the page and visible';
+  }
+
+  function pageOf(href) {
+    var m = String(href || '').match(/[?&]page=(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  // A diagnostic must never throw, whatever the page's base URL looks like.
+  function absolute(href) {
+    if (!href) return null;
+    try { return new URL(href, location.href).href; } catch (e) { return href; }
+  }
+
+  var currentPage = pageOf(location.href) || 1;
+  var nextHref = nextLink ? nextLink.getAttribute('href') : null;
+  var nextPage = pageOf(nextHref);
+
+  out.whatTheAutoLikerSees = {
+    paginationBlock: visibility(pagBlock),
+    nextLink: nextLink ? visibility(nextLink) : '(no a.next_page / rel=next)',
+    currentPage: currentPage,
+    nextPageItWouldGoTo: nextPage,
+    nextUrlItWouldUse: absolute(nextHref),
+    canJumpToAPage: !!(pagBlock || nextLink || nav.pageLinks.length)
+  };
+
   /* ------------------------------------------- filters that could narrow it */
   var filters = [];
   all('select, input[type="date"], [role="tab"], .nav-tabs a, .tab a').slice(0, 12).forEach(function (el) {
@@ -129,12 +172,39 @@
   console.log(text);
   console.log('%c===================== end of probe =====================', 'font-weight:bold');
 
-  if (nav.anythingUsable) {
-    console.log('%cLooks like this feed MIGHT be jumpable. Send the block above.',
+  var w = out.whatTheAutoLikerSees;
+  if (w.canJumpToAPage) {
+    console.log('%cThis feed CAN be jumped into, whether or not you can see page numbers.',
       'color:#2f8f5b;font-weight:bold');
+    console.log('%cTry it by hand right now: put this in the address bar and press Enter:',
+      'font-weight:bold');
+    console.log('%c' + urlForPage(location.href, 73), 'color:#2f6f8f');
+    if (w.paginationBlock.indexOf('hidden') === 0 || w.paginationBlock.indexOf('IN THE PAGE but hidden') === 0) {
+      console.log('%cNote: the page links exist but are hidden by the site\'s own CSS, ' +
+        'which is why you cannot see them at the bottom. That does not stop the URL from working.',
+        'color:#a07a2a');
+    }
   } else {
-    console.log('%cNo pagination or load-more control found — this feed can probably only be scrolled.',
+    console.log('%cNo pagination found — this feed can probably only be scrolled.',
       'color:#a07a2a;font-weight:bold');
+  }
+
+  function urlForPage(href, page) {
+    var base = String(href).split('#')[0];
+    var qAt = base.indexOf('?');
+    var path = qAt >= 0 ? base.slice(0, qAt) : base;
+    var parts = qAt >= 0 ? base.slice(qAt + 1).split('&') : [];
+    var kept = [], replaced = false;
+    parts.forEach(function (pair) {
+      if (!pair) return;
+      if (pair.split('=')[0] === 'page') {
+        if (!replaced) { kept.push('page=' + page); replaced = true; }
+        return;
+      }
+      kept.push(pair);
+    });
+    if (!replaced) kept.push('page=' + page);
+    return path + (kept.length ? '?' + kept.join('&') : '');
   }
 
   try {
