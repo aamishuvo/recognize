@@ -415,6 +415,47 @@ async function standaloneChecks(browser) {
     eq(mounted, true, 'the bookmarklet payload runs and mounts');
   });
 
+  await check('the feed probe reports the feed and changes nothing', async () => {
+    const probe = fs.readFileSync(path.join(ROOT, 'dist', 'feed-probe.js'), 'utf8');
+    const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.goto(FEED);
+    await page.waitForFunction(() => window.mock && window.mock.unlikedCount() > 0);
+
+    const before = await page.evaluate(() => ({
+      unliked: window.mock.unlikedCount(), liked: window.mock.likedCount(),
+      clicks: window.mock.totalClicks, html: document.body.innerHTML.length
+    }));
+
+    const out = await page.evaluate(probe);
+
+    const after = await page.evaluate(() => ({
+      unliked: window.mock.unlikedCount(), liked: window.mock.likedCount(),
+      clicks: window.mock.totalClicks, html: document.body.innerHTML.length,
+      forbidden: window.mock.forbiddenClicks.length,
+      removed: window.mock.unlikedByAutomation.length
+    }));
+    await page.close();
+
+    // Read-only is the whole point: it runs on the real feed before we trust it.
+    eq(after.clicks, before.clicks, 'the probe clicked nothing');
+    eq(after.unliked, before.unliked, 'it liked nothing');
+    eq(after.liked, before.liked, 'it unliked nothing');
+    eq(after.forbidden, 0, 'no forbidden interaction');
+    eq(after.removed, 0, 'no like was removed');
+    eq(after.html, before.html, 'it did not modify the page');
+    eq(errors.length, 0, 'no page errors: ' + errors.join('; '));
+
+    // And it actually reports something useful.
+    eq(out.counts.recognitionsOnPage > 0, true, 'it counted the recognitions');
+    eq(out.scrolling.container.includes('feed-scroller'), true,
+      'it found the real scroll container: ' + out.scrolling.container);
+    eq(typeof out.feedNavigation.anythingUsable, 'boolean', 'it reports whether the feed is jumpable');
+    eq(/\/recognitions\/[A-Za-z0-9_-]+\/approvals/.test(out.sampleApprovalHref), true,
+      'it reports a sample approval href');
+  });
+
   await check('the generated builds match the current engine', async () => {
     const engine = fs.readFileSync(path.join(ROOT, 'extension', 'content', 'engine.js'), 'utf8');
     const gate = engine.slice(engine.indexOf('function safetyCheck'), engine.indexOf('function recognitionIdOf'));
