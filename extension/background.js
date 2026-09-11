@@ -14,6 +14,9 @@
 'use strict';
 
 const DEFAULT_SETTINGS = {
+  stopAfterConsecutiveAlreadyLiked: 40,
+  fastForward: true,
+  keepAwakeInBackground: true,
   scrollAmount: 700,
   scrollDelay: 1500,
   clickDelay: 1200,
@@ -70,10 +73,16 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 /**
- * Watchdog. It cannot make a throttled tab run faster — nothing can, and we do
- * not try to defeat Chrome's throttling. It notices that a run has stopped
- * making progress and records that, so the popup can tell the truth instead of
- * showing a stale "RUNNING".
+ * Watchdog and catch-up ping.
+ *
+ * The service worker is woken by an alarm and is not subject to the timer
+ * clamping Chrome applies to background tabs. So on each tick we ping every
+ * running tab; the content script then settles any wait whose deadline has
+ * already passed. That cannot make a click happen sooner than its own delay
+ * allowed — it only stops a throttled run from sitting idle between wakeups.
+ *
+ * A run that still makes no progress is reported as stalled, so the popup can
+ * tell the truth instead of showing a stale "RUNNING".
  */
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== WATCHDOG_ALARM) return;
@@ -84,7 +93,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   for (const [key, value] of Object.entries(all)) {
     if (!key.startsWith('status_') || !value || typeof value !== 'object') continue;
     const active = value.state === 'RUNNING' || value.state === 'WAITING';
-    const stalled = active && now - (value.updatedAt || 0) > STALL_AFTER_MS;
+    if (!active) continue;
+
+    if (Number.isInteger(value.tabId)) {
+      try {
+        await chrome.tabs.sendMessage(value.tabId, { type: 'RAL_TICK' });
+      } catch (e) {
+        // Tab closed, navigated away, or the content script is gone. The
+        // stalled flag below will reflect it; nothing to recover here.
+      }
+    }
+
+    const stalled = now - (value.updatedAt || 0) > STALL_AFTER_MS;
     if (stalled !== !!value.stalled) updates[key] = { ...value, stalled };
   }
 

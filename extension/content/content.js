@@ -69,7 +69,10 @@
     try { chrome.storage.local.set({ history: historyMap }); } catch (e) {}
   }
   setInterval(flushHistory, 5000);
-  window.addEventListener('pagehide', flushHistory);
+  window.addEventListener('pagehide', function () {
+    flushHistory();
+    if (keepAlive && keepAlive.status().active) keepAlive.stop();
+  });
 
   /* -------------------------------------------------------------- engine */
   function ensureEngine(settings) {
@@ -85,10 +88,25 @@
     return engine;
   }
 
+  var keepAlive = window.__ralKeepAlive || null;
+  var keepAliveWanted = false;
+
+  /** Hold the tab awake only while a run is actually in progress. */
+  function syncKeepAlive(state) {
+    if (!keepAlive) return;
+    var running = state === 'RUNNING' || state === 'WAITING' || state === 'PAUSED';
+    if (keepAliveWanted && running) {
+      if (!keepAlive.status().active) keepAlive.start();
+    } else if (keepAlive.status().active) {
+      keepAlive.stop();
+    }
+  }
+
   var lastPush = 0;
   var pushTimer = null;
 
   function onEngineUpdate(snap) {
+    syncKeepAlive(snap.state);
     renderBadge(snap);
     var now = Date.now();
     if (now - lastPush > 400) {
@@ -119,6 +137,7 @@
       stats: snap.stats,
       settings: snap.settings,
       lastResult: snap.lastResult,
+      keepAlive: keepAlive ? keepAlive.status() : { supported: false, active: false },
       url: location.href,
       updatedAt: Date.now()
     };
@@ -190,15 +209,31 @@
 
   /* ------------------------------------------------------------ messaging */
   chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+    // The service worker is not throttled the way a background tab is, so it
+    // pings us on an alarm. We settle any wait Chrome already owed us, which
+    // keeps a backgrounded run moving without changing click pacing.
+    if (msg && msg.type === 'RAL_TICK') {
+      var result = engine ? engine.nudge() : { caughtUp: 0, overdueBy: 0, pending: 0 };
+      sendResponse({
+        ok: true,
+        state: engine ? engine.getState() : 'STOPPED',
+        nudged: result.caughtUp,
+        overdueBy: result.overdueBy
+      });
+      return true;
+    }
+
     if (!msg || msg.type !== 'RAL_COMMAND') return false;
 
     loadState().then(function (stored) {
       var settings = Object.assign({}, stored, msg.settings || {});
       var eng = ensureEngine(settings);
+      keepAliveWanted = settings.keepAwakeInBackground !== false;
 
       switch (msg.command) {
         case 'START':
           eng.start(settings);
+          syncKeepAlive(eng.getState());
           break;
         case 'PAUSE':
           eng.pause();
@@ -208,6 +243,7 @@
           break;
         case 'STOP':
           eng.stop('popup STOP');
+          syncKeepAlive('STOPPED');
           flushHistory();
           break;
         case 'DIAGNOSE':

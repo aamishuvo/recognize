@@ -39,6 +39,7 @@
       ],
       "js": [
         "content/engine.js",
+        "content/keepalive.js",
         "content/content.js"
       ],
       "css": [

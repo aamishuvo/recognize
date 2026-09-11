@@ -2,8 +2,10 @@
 'use strict';
 
 const SETTING_FIELDS = [
-  'scrollAmount', 'scrollDelay', 'clickDelay', 'maxLikesPerRun', 'maxNoNewContentAttempts'
+  'scrollAmount', 'scrollDelay', 'clickDelay', 'maxLikesPerRun', 'maxNoNewContentAttempts',
+  'stopAfterConsecutiveAlreadyLiked'
 ];
+const BOOL_FIELDS = ['keepAwakeInBackground'];
 
 const $ = (id) => document.getElementById(id);
 let activeTab = null;
@@ -18,7 +20,7 @@ async function init() {
   const { settings } = await chrome.storage.local.get('settings');
   applySettings(settings || {});
 
-  SETTING_FIELDS.forEach((id) => $(id).addEventListener('change', saveSettings));
+  [...SETTING_FIELDS, ...BOOL_FIELDS].forEach((id) => $(id).addEventListener('change', saveSettings));
   $('start').addEventListener('click', () => command('START'));
   $('pause').addEventListener('click', () => command($('pause').dataset.mode === 'resume' ? 'RESUME' : 'PAUSE'));
   $('stop').addEventListener('click', () => command('STOP'));
@@ -38,6 +40,7 @@ async function init() {
 
 function applySettings(s) {
   SETTING_FIELDS.forEach((id) => { if (s[id] != null) $(id).value = s[id]; });
+  $('keepAwakeInBackground').checked = s.keepAwakeInBackground !== false;
 }
 
 async function saveSettings() {
@@ -47,6 +50,7 @@ async function saveSettings() {
     const v = parseInt($(id).value, 10);
     if (Number.isFinite(v)) next[id] = v;
   });
+  BOOL_FIELDS.forEach((id) => { next[id] = $(id).checked; });
   // The popup exposes single base values; explicit min/max belong to Options.
   // Clearing them here keeps the derived ranges consistent with clickDelay.
   next.minClickDelay = null;
@@ -150,6 +154,27 @@ function render(status) {
 
   if (status && status.stalled) {
     notice('Chrome has throttled this background tab, so progress is slow. Bring the tab forward to speed it up.');
+  }
+  renderKeepAlive(status && status.keepAlive, running || paused);
+
+  const reason = status && status.lastResult && status.lastResult.reason;
+  if (state === 'STOPPED' && reason === 'CAUGHT_UP') {
+    notice('Caught up — everything below was already liked, so the run stopped instead of re-walking the whole feed.');
+  }
+}
+
+function renderKeepAlive(ka, active) {
+  const hint = $('keepalive-hint');
+  if (!ka || !active || !$('keepAwakeInBackground').checked) { hint.hidden = true; return; }
+  hint.hidden = false;
+  if (!ka.supported) {
+    hint.textContent = 'Keep-awake unavailable in this browser; a background tab will run slowly.';
+  } else if (ka.audioState === 'suspended') {
+    hint.textContent = 'Click once anywhere on the Recognize page to arm keep-awake.';
+  } else if (ka.active && ka.audioState === 'running') {
+    hint.textContent = 'Keep-awake on — this tab shows a speaker icon while it runs.';
+  } else {
+    hint.textContent = 'Keep-awake starting…';
   }
 }
 

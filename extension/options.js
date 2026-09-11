@@ -3,10 +3,11 @@
 
 const NUMBER_FIELDS = [
   'scrollAmount', 'scrollDelay', 'maxNoNewContentAttempts',
-  'clickDelay', 'verifyTimeout', 'maxLikesPerRun', 'historyFailureLimit'
+  'clickDelay', 'verifyTimeout', 'maxLikesPerRun', 'historyFailureLimit',
+  'stopAfterConsecutiveAlreadyLiked'
 ];
 const NULLABLE_FIELDS = ['minClickDelay', 'maxClickDelay'];
-const BOOL_FIELDS = ['showBadge', 'debug'];
+const BOOL_FIELDS = ['showBadge', 'debug', 'fastForward', 'keepAwakeInBackground'];
 
 const $ = (id) => document.getElementById(id);
 let defaults = {};
@@ -29,6 +30,8 @@ async function load() {
   NULLABLE_FIELDS.forEach((id) => { $(id).value = s[id] == null ? '' : s[id]; });
   BOOL_FIELDS.forEach((id) => { $(id).checked = s[id] !== false && s[id] !== undefined ? !!s[id] : false; });
   $('showBadge').checked = s.showBadge !== false;
+  $('fastForward').checked = s.fastForward !== false;
+  $('keepAwakeInBackground').checked = s.keepAwakeInBackground !== false;
   showHistoryCount(history);
 }
 

@@ -68,3 +68,6 @@ label .u { width: 20px; color: var(--muted); font-size: 11px; }
 .links a { color: var(--muted); }
 .hint { margin: 10px 0 0; font-size: 11px; color: var(--muted); text-align: center; }
 kbd { background: var(--chip); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+
+label.check { justify-content: flex-start; gap: 8px; }
+label.check input { margin-left: 0; width: auto; }

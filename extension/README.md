@@ -222,6 +222,37 @@ re-examines items it has seen before.
 
 ---
 
+## 5b. Catching up on a feed you have already worked through
+
+Once you have liked a few thousand posts, the tedious part is no longer liking —
+it is scrolling back down through everything you already liked to reach the few new
+ones. Two settings deal with that.
+
+**Stop when caught up** (default: 40). A recognition feed is newest-first, so anything
+new is at the top and anything below a long unbroken run of already-liked posts is older
+and already handled. When that many already-liked recognitions are met back to back with
+nothing new in between, the run stops with the reason `CAUGHT_UP`. Crucially it stops
+*before* pulling in the rest of the history, so those pages are never fetched at all.
+
+The check runs **after** each batch is processed, so anything new at the top is always
+liked first, and the counter resets the moment a new post appears — a new post buried
+below old ones is still found and liked.
+
+Set it to `0` to walk the whole feed as before. Raise it if your feed is not strictly
+chronological or old posts get bumped back to the top; lower it for a faster daily pass.
+
+**Fast-forward** (default: on). When a stretch of feed has nothing to like, the run
+scrolls further per step and waits only as long as new cards need to appear. It changes
+**scrolling only** — clicks keep their full randomised pacing and the safety gate is
+untouched, which the test suite asserts by checking that both passes dispatch exactly the
+same number of clicks.
+
+A third, invisible improvement: looking a recognition up by ID now uses one indexed
+attribute selector instead of sweeping every approval link on the page. With a few
+thousand cards loaded that is the difference between instant and visibly sluggish.
+
+---
+
 ## 6. Auto-scroll and the dynamic feed
 
 The extension does **not** assume the page scrolls. It walks up from a real recognition
@@ -251,6 +282,33 @@ The extension is built so it does **not** need to be watched:
   wait into many minutes.
 * Nothing important lives in the service worker: MV3 suspends it freely, so all state is
   in `chrome.storage.local` and all automation is in the content script.
+
+### Two mechanisms keep a background run moving
+
+**Always on — the service-worker catch-up ping.** Chrome clamps timers in a tab you are
+not looking at, so a `setTimeout` can fire long after it was due and the run crawls. The
+MV3 service worker is woken by an alarm and is not throttled the same way, so it pings the
+tab twice a minute; the engine then settles any wait whose deadline has **already passed**.
+It can never make a click happen sooner than its own delay allowed — it only stops a
+throttled run sitting idle between wakeups.
+
+**Opt-in — "Keep running while you use other tabs".** This additionally holds an inaudible
+Web Audio tone for the duration of a run. Chrome keeps tabs that are producing audio fully
+awake and does not freeze or discard them, so the run holds its normal pace while you work
+elsewhere.
+
+Being straight about the trade-off, which is why it is a checkbox and not the default
+behaviour:
+
+* Chrome shows the speaker icon on the tab and lists it in the media controls.
+* It holds an audio output device open for as long as the run lasts.
+* It stops the moment the run stops.
+* If you have not clicked anywhere on the page since it loaded, Chrome's autoplay policy
+  keeps the tone suspended — the popup then tells you to click once on the feed. (Clicking
+  START in the popup is a gesture in the *popup*, not in the page.)
+
+It is not a security bypass and it does not touch the page, the feed or the click-safety
+gate. It only keeps the tab awake.
 
 ### Important limitation — please read
 
