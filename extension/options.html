@@ -73,6 +73,29 @@
   </section>
 
   <section>
+    <h2>Keeping a huge feed responsive</h2>
+    <label class="check"><input type="checkbox" id="pruneProcessedCards"> Release finished posts from the page</label>
+    <p class="explain">
+      An infinite feed never throws anything away, so on a catch-up run the tab ends up
+      holding thousands of cards and avatars until Chrome hangs. With this on, posts you
+      have already finished with, and that are scrolled well above the visible feed, are
+      removed from the page as you go.
+      <strong>Only already-processed, off-screen cards are ever touched</strong> — never a
+      post still waiting to be liked, never anything on screen, and never the most recent
+      cards. The scroll position is corrected so the view does not jump. It only changes
+      what your browser is holding in memory; nothing is changed on RecognizeApp.
+    </p>
+    <label>Start releasing above
+      <input type="number" id="pruneWhenCardsExceed" min="50" step="50">
+      <small>posts loaded. Below this the page is left completely alone.</small>
+    </label>
+    <label>Always keep the most recent
+      <input type="number" id="keepRecentCards" min="20" step="10">
+      <small>posts in the page, so the feed's own loader keeps working normally.</small>
+    </label>
+  </section>
+
+  <section>
     <h2>Running in the background</h2>
     <label class="check"><input type="checkbox" id="keepAwakeInBackground"> Keep running while you use other tabs</label>
     <p class="explain">

@@ -525,6 +525,109 @@
   });
 
   /* =================================================================== */
+  /* KEEPING A HUGE FEED FROM HANGING THE TAB                             */
+  /* =================================================================== */
+
+  test('27. Prunes finished cards so the DOM stops growing without limit', async function () {
+    // 40 cards up front, then 12 pages of 20 - the shape that ends up with
+    // thousands of nodes on a real catch-up run.
+    var initial = [];
+    for (var i = 0; i < 40; i++) initial.push({ id: ID(1000 + i), liked: true, count: 2 });
+    var batches = [];
+    for (var b = 0; b < 12; b++) {
+      var page = [];
+      for (var j = 0; j < 20; j++) page.push({ id: ID(1100 + b * 20 + j), liked: true, count: 1 });
+      batches.push(page);
+    }
+
+    var s = setup({ cards: initial, batches: batches, loadDelay: 60, height: 240 }, {
+      stopAfterConsecutiveAlreadyLiked: 0,        // walk the whole thing
+      pruneProcessedCards: true, pruneWhenCardsExceed: 60, keepRecentCards: 30
+    });
+    var r = await s.engine.start();
+
+    var stillInDom = s.host.querySelectorAll('li.recognition').length;
+    eq(r.stats.scanned, 280, 'it saw all 280 recognitions');
+    assert(r.stats.pruned > 0, 'it pruned finished cards (' + r.stats.pruned + ')');
+    assert(stillInDom < 280, 'the DOM is far smaller than the feed (' + stillInDom + ' of 280)');
+    assert(stillInDom <= 120, 'and stays bounded rather than growing forever (' + stillInDom + ')');
+    eq(r.reason, 'END_OF_FEED', 'and it still reached the end of the feed properly');
+    assertNoDamage(s.mock);
+  });
+
+  test('28. Pruning never removes an unfinished or on-screen card', async function () {
+    // A new post is buried deep in the tail: pruning must not take it away
+    // before it has been liked.
+    var initial = [];
+    for (var i = 0; i < 40; i++) initial.push({ id: ID(2000 + i), liked: true, count: 1 });
+    var batches = [];
+    for (var b = 0; b < 6; b++) {
+      var page = [];
+      for (var j = 0; j < 20; j++) page.push({ id: ID(2100 + b * 20 + j), liked: true, count: 2 });
+      batches.push(page);
+    }
+    batches[4][10] = { id: ID(2500), liked: false, count: 3 };   // the only new one
+
+    var s = setup({ cards: initial, batches: batches, loadDelay: 60, height: 240 }, {
+      stopAfterConsecutiveAlreadyLiked: 0,
+      pruneProcessedCards: true, pruneWhenCardsExceed: 50, keepRecentCards: 25
+    });
+    var r = await s.engine.start();
+
+    eq(s.mock.clicks[ID(2500)], 1, 'the buried new post was still found and liked');
+    eq(r.stats.newLikes, 1, 'exactly one new like');
+    assert(r.stats.pruned > 0, 'pruning did happen alongside it');
+    assertNoDamage(s.mock);
+  });
+
+  test('29. Pruning keeps the scroll position steady', async function () {
+    var cards = [];
+    for (var i = 0; i < 120; i++) cards.push({ id: ID(3000 + i), liked: true, count: 1 });
+    // First pass with pruning OFF, purely to mark every card as finished with -
+    // otherwise the run prunes the feed below the threshold and there is
+    // nothing left for the measurement below to remove.
+    var s = setup({ cards: cards, height: 240 }, {
+      pruneProcessedCards: false, stopAfterConsecutiveAlreadyLiked: 0
+    });
+    await s.engine.start();
+    eq(s.host.querySelectorAll('li.recognition').length, 120, 'all 120 cards still present');
+
+    s.engine.updateSettings({
+      pruneProcessedCards: true, pruneWhenCardsExceed: 40, keepRecentCards: 20
+    });
+    s.mock.root.scrollTop = Math.round(s.mock.root.scrollHeight / 2);
+    await wait(50);
+
+    var anchorBefore = s.host.querySelectorAll('li.recognition');
+    var refId = anchorBefore.length
+      ? anchorBefore[anchorBefore.length - 1].getAttribute('data-recognition-id') : null;
+    var topBefore = refId
+      ? s.host.querySelector('li[data-recognition-id="' + refId + '"]').getBoundingClientRect().top : null;
+
+    var removed = s.engine.pruneNow();
+    assert(removed > 0, 'something was pruned (' + removed + ')');
+
+    var refEl = refId ? s.host.querySelector('li[data-recognition-id="' + refId + '"]') : null;
+    assert(!!refEl, 'the reference card survived');
+    var topAfter = refEl.getBoundingClientRect().top;
+    assert(Math.abs(topAfter - topBefore) <= 4,
+      'the view did not jump (moved ' + Math.round(topAfter - topBefore) + 'px)');
+    assertNoDamage(s.mock);
+  });
+
+  test('30. Pruning can be switched off', async function () {
+    var cards = [];
+    for (var i = 0; i < 80; i++) cards.push({ id: ID(4000 + i), liked: true, count: 1 });
+    var s = setup({ cards: cards, height: 240 }, {
+      pruneProcessedCards: false, stopAfterConsecutiveAlreadyLiked: 0
+    });
+    var r = await s.engine.start();
+    eq(r.stats.pruned, 0, 'nothing was pruned');
+    eq(s.host.querySelectorAll('li.recognition').length, 80, 'every card is still in the DOM');
+    assertNoDamage(s.mock);
+  });
+
+  /* =================================================================== */
   /* BACKGROUND-TAB CATCH-UP                                              */
   /* =================================================================== */
 
