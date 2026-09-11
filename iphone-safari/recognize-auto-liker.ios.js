@@ -98,6 +98,7 @@
     fastForward: true,
     fastForwardAfter: 2,        // scans with nothing to like before speeding up
     fastForwardMultiplier: 3,   // scroll this many times further while skimming
+    fastForwardMaxMultiplier: 12, // ...escalating up to this over a long dead stretch
     /*
      * THE ANSWER TO "THE PAGE HANGS WHILE IT LOADS".
      * An infinite feed never throws anything away, so after a couple of thousand
@@ -850,6 +851,7 @@
 
     function runLoop() {
       var noNewContent = 0;
+      var skimGrace = false;   // a miss while skimming buys one full-speed retry
 
       function iteration() {
         if (stopRequested) return Promise.resolve(STOP_REASON.USER);
@@ -905,14 +907,32 @@
 
             // Nothing to like around here: skim instead of crawling. Only the
             // scroll changes - no click is ever made faster by this.
-            var skimming = settings.fastForward && emptyScans >= settings.fastForwardAfter;
+            // Skim only while we are confident there is more feed below us.
+            // After any miss we go back to full speed before drawing
+            // conclusions, because a shortened wait is not evidence of anything.
+            var skimming = settings.fastForward &&
+                           emptyScans >= settings.fastForwardAfter &&
+                           noNewContent === 0 &&
+                           !skimGrace;
             var wait = scrollWaitDelay();
+
             if (skimming) {
-              var mult = Math.max(1, settings.fastForwardMultiplier);
+              // The longer the dead stretch, the bigger the jumps. Walking a
+              // couple of thousand already-liked posts at one screen per step
+              // is the slow part of a catch-up run.
+              var steps = Math.max(1, Math.floor(emptyScans / Math.max(1, settings.fastForwardAfter)));
+              var mult = Math.min(
+                Math.max(1, settings.fastForwardMaxMultiplier),
+                Math.max(1, settings.fastForwardMultiplier) * steps
+              );
               delta = Math.round(delta * mult);
               // Never longer than the normal wait: the floor is a sanity guard,
               // not a reason for "fast" to end up slower than "slow".
               wait = Math.min(wait, Math.max(300, Math.round(wait / mult)));
+            } else if (noNewContent > 0) {
+              // Each consecutive miss waits longer. A feed that is merely slow
+              // to hand over the next page should not look like the end of it.
+              wait = Math.round(wait * (1 + noNewContent * 0.75));
             }
 
             log((skimming ? 'Fast-forward: scrolling' : 'Scrolling') + ' feed by ' + delta + 'px' +
@@ -940,8 +960,16 @@
 
               if (foundMore || grewHeight || pending > 0 || (moved && !atBottom)) {
                 noNewContent = 0;
+                skimGrace = false;
+              } else if (skimming) {
+                // We were skimming with a deliberately short wait, so this miss
+                // proves nothing: the feed may simply be slower than the wait.
+                // Retry the same spot at full speed before counting it.
+                skimGrace = true;
+                log('Nothing new after a fast scroll - retrying at full speed before calling it the end');
               } else {
                 noNewContent++;
+                skimGrace = false;
                 log('No new content (' + noNewContent + '/' + settings.maxNoNewContentAttempts + ')');
               }
 
@@ -976,12 +1004,72 @@
         viewportHeight: m.client,
         scrollTop: m.top,
         cardOutline: unliked.length ? outline(unliked[0]) : [],
+        pagination: detectPagination(),
         selectors: SELECTORS
       };
 
       log('Diagnostic: ' + report.unlikedCount + ' unliked, ' + report.likedCount +
           ' already liked, container ' + report.scrollContainer);
+
+      try {
+        console.group('[RecognizeAutoLiker] Feed navigation options');
+        if (report.pagination.usable) {
+          console.log('This feed appears to expose a way to jump directly. Details:');
+        } else {
+          console.log('No pagination, "load more" control or cursor attribute found.');
+          console.log('That means the feed can only be walked sequentially - there is no');
+          console.log('way to resume partway down without loading what comes before it.');
+        }
+        console.log(report.pagination);
+        console.groupEnd();
+      } catch (e) {}
+
       return report;
+    }
+
+    /**
+     * Looks for a way to jump straight to a point in the feed instead of
+     * scrolling there. An infinite feed can only be walked sequentially unless
+     * the site exposes pages or a cursor, so this reports whatever it finds and
+     * lets a human decide whether it is usable. It never follows anything.
+     */
+    function detectPagination() {
+      var found = { pageLinks: [], nextLinks: [], loadMore: [], cursorAttributes: [], urlParams: [] };
+
+      try {
+        queryAll('a[href*="page="], a[href*="per_page="], a[href*="offset="]').slice(0, 8)
+          .forEach(function (a) { found.pageLinks.push(a.getAttribute('href')); });
+
+        queryAll('a[rel="next"], link[rel="next"], [data-next-page], [data-next-url]').slice(0, 5)
+          .forEach(function (el) {
+            found.nextLinks.push(el.getAttribute('href') || el.getAttribute('data-next-url') || describe(el));
+          });
+
+        // Text-based "load more" affordances, matched loosely on purpose.
+        queryAll('a, button').forEach(function (el) {
+          if (found.loadMore.length >= 5) return;
+          var text = (el.textContent || '').trim().toLowerCase();
+          if (!text || text.length > 40) return;
+          if (/load more|show more|see more|older|view more|next page/.test(text)) {
+            found.loadMore.push(text + '  ->  ' + describe(el));
+          }
+        });
+
+        ['data-page', 'data-cursor', 'data-offset', 'data-last-id', 'data-oldest', 'data-before']
+          .forEach(function (attr) {
+            var el = root.querySelector('[' + attr + ']');
+            if (el) found.cursorAttributes.push(attr + '="' + el.getAttribute(attr) + '" on ' + describe(el));
+          });
+
+        var qs = (doc.location && doc.location.search) || '';
+        if (qs) qs.replace(/^\?/, '').split('&').forEach(function (pair) {
+          if (pair) found.urlParams.push(pair);
+        });
+      } catch (e) { /* diagnostics must never throw */ }
+
+      found.usable = !!(found.pageLinks.length || found.nextLinks.length ||
+                        found.loadMore.length || found.cursorAttributes.length);
+      return found;
     }
 
     function outline(el) {

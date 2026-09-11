@@ -627,6 +627,77 @@
     assertNoDamage(s.mock);
   });
 
+  test('31. A slow-loading feed is not mistaken for the end of the feed', async function () {
+    // The exact failure: at the bottom of the feed, waiting for the next page.
+    // Fast-forward shortens the wait, the page has not arrived yet, and each
+    // short wait was counted as evidence that the feed had ended - so the run
+    // died partway down with END_OF_FEED.
+    var initial = [];
+    for (var i = 0; i < 10; i++) initial.push({ id: ID(5000 + i), liked: true, count: 1 });
+    var batches = [];
+    for (var b = 0; b < 3; b++) {
+      var page = [];
+      for (var j = 0; j < 10; j++) page.push({ id: ID(5100 + b * 10 + j), liked: true, count: 2 });
+      batches.push(page);
+    }
+    batches[2].push({ id: ID(5900), liked: false, count: 4 });   // the prize, at the bottom
+
+    var s = setup({
+      cards: initial, batches: batches,
+      loadDelay: 1500,          // far slower than any skimming wait
+      height: 240
+    }, {
+      scrollDelay: 300, fastForward: true, fastForwardAfter: 1,
+      fastForwardMultiplier: 4, maxNoNewContentAttempts: 3,
+      stopAfterConsecutiveAlreadyLiked: 0, pruneProcessedCards: false
+    });
+
+    var r = await s.engine.start();
+
+    eq(s.mock.batchesLoaded, 3, 'every page was eventually loaded despite the slow feed');
+    eq(s.mock.clicks[ID(5900)], 1, 'the post at the very bottom was reached and liked');
+    eq(r.stats.newLikes, 1, 'exactly one new like');
+    eq(r.reason, 'END_OF_FEED', 'and it ended only once the feed was genuinely exhausted');
+    assertNoDamage(s.mock);
+  });
+
+  test('32. Fast-forward jumps further the longer a dead stretch runs', async function () {
+    var cards = [];
+    for (var i = 0; i < 200; i++) cards.push({ id: ID(6000 + i), liked: true, count: 1 });
+
+    var flat = setup({ cards: cards, height: 240 }, {
+      fastForward: true, fastForwardAfter: 1,
+      fastForwardMultiplier: 2, fastForwardMaxMultiplier: 2,   // no escalation
+      stopAfterConsecutiveAlreadyLiked: 0, pruneProcessedCards: false
+    });
+    var flatRun = await flat.engine.start();
+
+    var escalating = setup({ cards: cards, height: 240 }, {
+      fastForward: true, fastForwardAfter: 1,
+      fastForwardMultiplier: 2, fastForwardMaxMultiplier: 16,  // escalates
+      stopAfterConsecutiveAlreadyLiked: 0, pruneProcessedCards: false
+    });
+    var escRun = await escalating.engine.start();
+
+    eq(escRun.stats.scanned, flatRun.stats.scanned, 'both saw all 200 recognitions');
+    assert(escRun.stats.scrolls < flatRun.stats.scrolls,
+      'escalating covered the same ground in fewer scrolls (' +
+      escRun.stats.scrolls + ' vs ' + flatRun.stats.scrolls + ')');
+    eq(escalating.mock.totalClicks, 0, 'and clicked nothing, since there was nothing to like');
+    assertNoDamage(escalating.mock);
+  });
+
+  test('33. Diagnostics report whether the feed can be jumped into', function () {
+    var s = setup({ cards: [{ id: ID(7000), liked: false, count: 1 }] });
+    var report = s.engine.diagnose();
+    assert(!!report.pagination, 'a pagination section is reported');
+    ['pageLinks', 'nextLinks', 'loadMore', 'cursorAttributes', 'urlParams'].forEach(function (k) {
+      assert(Array.isArray(report.pagination[k]), 'pagination.' + k + ' is reported');
+    });
+    eq(typeof report.pagination.usable, 'boolean', 'and whether any of it is usable');
+    eq(s.mock.totalClicks, 0, 'diagnostics clicked nothing');
+  });
+
   /* =================================================================== */
   /* BACKGROUND-TAB CATCH-UP                                              */
   /* =================================================================== */
