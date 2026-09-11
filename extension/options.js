@@ -4,10 +4,13 @@
 const NUMBER_FIELDS = [
   'scrollAmount', 'scrollDelay', 'maxNoNewContentAttempts',
   'clickDelay', 'verifyTimeout', 'maxLikesPerRun', 'historyFailureLimit',
-  'stopAfterConsecutiveAlreadyLiked', 'pruneWhenCardsExceed', 'keepRecentCards'
+  'stopAfterConsecutiveAlreadyLiked', 'pruneWhenCardsExceed', 'keepRecentCards',
+  'stopAfterEmptyPages'
 ];
+const NULLABLE_PAGE_FIELDS = ['startAtPage'];
 const NULLABLE_FIELDS = ['minClickDelay', 'maxClickDelay'];
-const BOOL_FIELDS = ['showBadge', 'debug', 'fastForward', 'keepAwakeInBackground', 'pruneProcessedCards'];
+const BOOL_FIELDS = ['showBadge', 'debug', 'fastForward', 'keepAwakeInBackground',
+  'pruneProcessedCards', 'pageMode'];
 
 const $ = (id) => document.getElementById(id);
 let defaults = {};
@@ -16,7 +19,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   defaults = await chrome.runtime.sendMessage({ type: 'RAL_GET_DEFAULTS' });
   await load();
 
-  [...NUMBER_FIELDS, ...NULLABLE_FIELDS, ...BOOL_FIELDS].forEach((id) => {
+  [...NUMBER_FIELDS, ...NULLABLE_FIELDS, ...NULLABLE_PAGE_FIELDS, ...BOOL_FIELDS].forEach((id) => {
     $(id).addEventListener('change', save);
   });
   $('clear-history').addEventListener('click', clearHistory);
@@ -27,12 +30,15 @@ async function load() {
   const { settings, history } = await chrome.storage.local.get(['settings', 'history']);
   const s = { ...defaults, ...(settings || {}) };
   NUMBER_FIELDS.forEach((id) => { $(id).value = s[id] ?? ''; });
-  NULLABLE_FIELDS.forEach((id) => { $(id).value = s[id] == null ? '' : s[id]; });
+  NULLABLE_FIELDS.concat(NULLABLE_PAGE_FIELDS).forEach((id) => {
+    $(id).value = s[id] == null ? '' : s[id];
+  });
   BOOL_FIELDS.forEach((id) => { $(id).checked = s[id] !== false && s[id] !== undefined ? !!s[id] : false; });
   $('showBadge').checked = s.showBadge !== false;
   $('fastForward').checked = s.fastForward !== false;
   $('keepAwakeInBackground').checked = s.keepAwakeInBackground !== false;
   $('pruneProcessedCards').checked = s.pruneProcessedCards !== false;
+  $('pageMode').checked = s.pageMode !== false;
   showHistoryCount(history);
 }
 
@@ -49,10 +55,10 @@ async function save() {
     const v = parseInt($(id).value, 10);
     if (Number.isFinite(v)) next[id] = v;
   });
-  NULLABLE_FIELDS.forEach((id) => {
+  NULLABLE_FIELDS.concat(NULLABLE_PAGE_FIELDS).forEach((id) => {
     const raw = $(id).value.trim();
     const v = parseInt(raw, 10);
-    next[id] = raw === '' || !Number.isFinite(v) ? null : v;   // blank = derive from clickDelay
+    next[id] = raw === '' || !Number.isFinite(v) ? null : v;   // blank = auto / start here
   });
   BOOL_FIELDS.forEach((id) => { next[id] = $(id).checked; });
 

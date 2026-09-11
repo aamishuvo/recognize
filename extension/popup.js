@@ -3,9 +3,9 @@
 
 const SETTING_FIELDS = [
   'scrollAmount', 'scrollDelay', 'clickDelay', 'maxLikesPerRun', 'maxNoNewContentAttempts',
-  'stopAfterConsecutiveAlreadyLiked'
+  'stopAfterConsecutiveAlreadyLiked', 'stopAfterEmptyPages', 'startAtPage'
 ];
-const BOOL_FIELDS = ['keepAwakeInBackground'];
+const BOOL_FIELDS = ['keepAwakeInBackground', 'pageMode'];
 
 const $ = (id) => document.getElementById(id);
 let activeTab = null;
@@ -25,6 +25,14 @@ async function init() {
   $('pause').addEventListener('click', () => command($('pause').dataset.mode === 'resume' ? 'RESUME' : 'PAUSE'));
   $('stop').addEventListener('click', () => command('STOP'));
   $('diagnose').addEventListener('click', runDiagnose);
+  $('resume').addEventListener('click', async () => {
+    const page = parseInt($('resume').dataset.page, 10);
+    if (Number.isFinite(page)) {
+      $('startAtPage').value = page;
+      await saveSettings();
+    }
+    command('START');
+  });
   $('open-options').addEventListener('click', (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
   $('reset-stats').addEventListener('click', async (e) => {
     e.preventDefault();
@@ -40,15 +48,20 @@ async function init() {
 
 function applySettings(s) {
   SETTING_FIELDS.forEach((id) => { if (s[id] != null) $(id).value = s[id]; });
+  if (s.startAtPage == null) $('startAtPage').value = '';
   $('keepAwakeInBackground').checked = s.keepAwakeInBackground !== false;
+  $('pageMode').checked = s.pageMode !== false;
 }
 
 async function saveSettings() {
   const { settings } = await chrome.storage.local.get('settings');
   const next = { ...(settings || {}) };
   SETTING_FIELDS.forEach((id) => {
-    const v = parseInt($(id).value, 10);
-    if (Number.isFinite(v)) next[id] = v;
+    const raw = $(id).value.trim();
+    const v = parseInt(raw, 10);
+    // A blank "start from page" means "begin wherever the browser already is".
+    if (id === 'startAtPage' && raw === '') next[id] = null;
+    else if (Number.isFinite(v)) next[id] = v;
   });
   BOOL_FIELDS.forEach((id) => { next[id] = $(id).checked; });
   // The popup exposes single base values; explicit min/max belong to Options.
@@ -156,9 +169,65 @@ function render(status) {
     notice('Chrome has throttled this background tab, so progress is slow. Bring the tab forward to speed it up.');
   }
   renderKeepAlive(status && status.keepAlive, running || paused);
+  renderPageProgress(status);
 
-  const reason = status && status.lastResult && status.lastResult.reason;
-  if (state === 'STOPPED' && reason) notice(explainStop(reason, stats));
+  // A per-page PAGE_DONE from the engine tells a person nothing. When a
+  // paginated run exists, ITS reason is the one worth showing.
+  const run = status && status.pageRun;
+  const engineReason = status && status.lastResult && status.lastResult.reason;
+  if (state === 'STOPPED') {
+    if (run && !run.active && run.lastReason) {
+      notice(explainPageStop(run, status && status.pagination));
+    } else if (engineReason && engineReason !== 'PAGE_DONE') {
+      notice(explainStop(engineReason, stats));
+    }
+  }
+}
+
+/** Page-by-page progress, and a one-click continue from where it got to. */
+function renderPageProgress(status) {
+  const row = $('page-row');
+  const resumeBtn = $('resume');
+  const info = status && status.pagination;
+  const run = status && status.pageRun;
+
+  if (!info || !info.paginated) {
+    row.hidden = true;
+    resumeBtn.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  const where = info.last ? `${info.current} of ${info.last}` : `${info.current}`;
+  $('page-info').textContent = run && run.active
+    ? `${where} · ${run.totals.newLikes} liked over ${run.pagesDone} page(s)`
+    : where;
+
+  const resumeAt = run && !run.active ? run.resumeAt : null;
+  if (resumeAt && resumeAt !== info.current) {
+    resumeBtn.hidden = false;
+    resumeBtn.dataset.page = resumeAt;
+    resumeBtn.textContent = `Resume from page ${resumeAt}`;
+  } else {
+    resumeBtn.hidden = true;
+  }
+}
+
+function explainPageStop(run, info) {
+  const done = `${run.pagesDone || 0} page(s), ${run.totals ? run.totals.newLikes : 0} new like(s).`;
+  switch (run.lastReason) {
+    case 'NO_PAGINATION':
+      return `Stopped: that page had no pagination, so there was nowhere to go next. Open the grid view that shows page links at the bottom, then start again. (${done})`;
+    case 'END_OF_FEED':
+      return `Reached the last page${info && info.last ? ` (${info.last})` : ''}. ${done}`;
+    case 'CAUGHT_UP':
+      return `Caught up — several pages in a row had nothing new. ${done}`;
+    case 'MAX_LIKES_REACHED':
+      return `Hit the maximum new likes for this run. ${done} Press Resume to carry on.`;
+    case 'STOPPED_BY_USER':
+      return `Stopped by you after ${done}`;
+    default:
+      return `Run ended: ${run.lastReason}. ${done}`;
+  }
 }
 
 /** Say plainly why the last run ended, so a surprising stop is not a mystery. */

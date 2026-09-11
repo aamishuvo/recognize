@@ -96,6 +96,33 @@
   </section>
 
   <section>
+    <h2>Page-by-page mode</h2>
+    <label class="check"><input type="checkbox" id="pageMode"> Use the feed's own pages instead of infinite scrolling</label>
+    <p class="explain">
+      The Recognize grid exposes real pagination (<code>?page=N</code>, a “next” link, a
+      pagination block at the bottom). When it does, this walks it a page at a time instead
+      of scrolling: each page is a small, fresh document, so nothing bloats and the tab
+      stops hanging — and because progress is just a page number, a run
+      <strong>resumes where it left off</strong> instead of reloading from the top.
+    </p>
+    <label>Start from page
+      <input type="number" id="startAtPage" min="1" step="1" placeholder="current">
+      <small>Jump straight here instead of walking from wherever the browser is. Leave
+        blank to start on the page you have open.</small>
+    </label>
+    <label>Stop after empty pages
+      <input type="number" id="stopAfterEmptyPages" min="0" step="1">
+      <small>consecutive pages with nothing new before the run stops. 0 keeps going to the last page.</small>
+    </label>
+    <p class="explain">
+      Moving to the next page is a real navigation, so the tab's address changes as it goes.
+      Progress is saved before every hop, so a reload or a closed tab loses at most the
+      current page. Every filter already applied to the feed is carried across. If a page
+      has no pagination this does nothing and scrolling is used instead.
+    </p>
+  </section>
+
+  <section>
     <h2>Running in the background</h2>
     <label class="check"><input type="checkbox" id="keepAwakeInBackground"> Keep running while you use other tabs</label>
     <p class="explain">
