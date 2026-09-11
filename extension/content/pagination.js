@@ -155,9 +155,29 @@
       };
     }
 
-    /** Begin a paginated run from whatever page is currently open. */
+    /**
+     * Begin a paginated run.
+     *
+     * settings.startAtPage jumps straight there instead of walking from
+     * wherever the browser happens to be. That is the whole point of having
+     * pagination: after 72 pages of history there is no reason to re-walk them.
+     */
     function start(settings) {
+      var info = parsePageInfo(doc(), win());
       var state = blankState(settings);
+
+      var target = parseInt(settings && settings.startAtPage, 10);
+      if (isFinite(target) && target > 0 && target !== info.current) {
+        state.page = target;
+        state.jumpedTo = target;
+        log('Jumping straight to page ' + target + ' (currently on ' + info.current + ')');
+        return storage.set(state).then(function () {
+          onUpdate(state);
+          navigate(urlForPage(win().location.href, target));
+          return { navigating: true, state: state };
+        });
+      }
+
       log('Paginated run starting at page ' + state.page);
       return storage.set(state).then(function () {
         onUpdate(state);
@@ -237,9 +257,20 @@
             ? urlForPage(win().location.href, info.current + 1)
             : null);
 
-        if (!nextUrl) return finish(state, 'END_OF_FEED');
+        if (!nextUrl) {
+          // Distinguish "the feed really ended" from "this page has no
+          // pagination markup", because they need completely different fixes.
+          if (!info.paginated) {
+            log('No pagination found on this page - cannot move on. ' +
+                'Is this the grid view the run started from?');
+            return finish(state, 'NO_PAGINATION');
+          }
+          return finish(state, 'END_OF_FEED');
+        }
 
         state.page = info.next || (info.current + 1);
+        state.lastPageReached = info.current;
+        state.resumeAt = state.page;
         log('Page ' + info.current + ' done (' + (s.newLikes || 0) + ' new). Moving to page ' + state.page);
 
         return storage.set(state).then(function () {
@@ -253,6 +284,9 @@
     function finish(state, reason) {
       state.active = false;
       state.lastReason = reason;
+      state.lastPageReached = parsePageInfo(doc(), win()).current;
+      // Where a fresh run should pick up next time.
+      state.resumeAt = reason === 'END_OF_FEED' ? state.lastPageReached : state.lastPageReached;
       return storage.set(state).then(function () {
         log('Paginated run finished (' + reason + ') after ' + state.pagesDone +
             ' page(s): ' + state.totals.newLikes + ' new like(s)');

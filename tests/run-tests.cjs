@@ -337,6 +337,67 @@ async function uiChecks(browser) {
     await page.close();
   });
 
+  check('every control the popup and options promise actually exists and is wired', async () => {
+    // This is the check that was missing when a silent find-and-replace left
+    // the page-mode controls out of popup.html while the code behind them
+    // shipped. A control that exists in one file and not the other is a bug.
+    const read = (f) => fs.readFileSync(path.join(ROOT, 'extension', f), 'utf8');
+    const popupHtml = read('popup.html');
+    const popupJs = read('popup.js');
+    const optionsHtml = read('options.html');
+    const optionsJs = read('options.js');
+
+    const required = {
+      'popup.html': ['scrollAmount', 'scrollDelay', 'clickDelay', 'maxLikesPerRun',
+        'maxNoNewContentAttempts', 'stopAfterConsecutiveAlreadyLiked',
+        'keepAwakeInBackground', 'pageMode', 'startAtPage', 'stopAfterEmptyPages',
+        'page-row', 'page-info', 'resume', 'start', 'pause', 'stop', 'diagnose'],
+      'options.html': ['scrollAmount', 'scrollDelay', 'clickDelay', 'maxLikesPerRun',
+        'stopAfterConsecutiveAlreadyLiked', 'fastForward', 'pruneProcessedCards',
+        'pruneWhenCardsExceed', 'keepRecentCards', 'keepAwakeInBackground',
+        'pageMode', 'startAtPage', 'stopAfterEmptyPages', 'showBadge', 'debug']
+    };
+
+    for (const id of required['popup.html']) {
+      eq(popupHtml.includes(`id="${id}"`), true, `popup.html is missing #${id}`);
+      eq(popupJs.includes(`'${id}'`), true, `popup.js never references #${id}`);
+    }
+    for (const id of required['options.html']) {
+      eq(optionsHtml.includes(`id="${id}"`), true, `options.html is missing #${id}`);
+      eq(optionsJs.includes(`'${id}'`), true, `options.js never references #${id}`);
+    }
+
+    // And nothing referenced in JS may be absent from the markup.
+    for (const [html, js, name] of [[popupHtml, popupJs, 'popup'], [optionsHtml, optionsJs, 'options']]) {
+      for (const m of js.matchAll(/\$\('([A-Za-z-]+)'\)/g)) {
+        eq(html.includes(`id="${m[1]}"`), true, `${name}.js reads #${m[1]} but ${name}.html has no such element`);
+      }
+    }
+  });
+
+  check('the popup reports a paginated run, not the engine\'s per-page result', async () => {
+    const status = {
+      available: true, state: 'STOPPED',
+      stats: { scanned: 15, alreadyLiked: 15, newLikes: 0, skipped: 0, errors: 0 },
+      lastResult: { reason: 'PAGE_DONE' },
+      pagination: { current: 73, last: 1792, paginated: true },
+      pageRun: {
+        active: false, lastReason: 'NO_PAGINATION', pagesDone: 1, resumeAt: 74,
+        totals: { newLikes: 0, alreadyLiked: 15, skipped: 0, errors: 0, scanned: 15 }
+      }
+    };
+    const page = await openPopup('https://recognizeapp.com/banglalink.net/grid', {
+      tabResponds: true, tabStatus: status
+    });
+    const notice = await page.textContent('#notice');
+    eq(notice.includes('PAGE_DONE'), false, 'it does not show the engine per-page reason');
+    eq(notice.includes('no pagination'), true, 'it explains the real reason: ' + notice);
+    eq(await page.textContent('#page-info'), '73 of 1792', 'it shows where in the feed it is');
+    eq(await page.getAttribute('#page-row', 'hidden'), null, 'the page row is visible');
+    eq(await page.textContent('#resume'), 'Resume from page 74', 'and offers to continue');
+    await page.close();
+  });
+
   console.log('\nExtension UI wiring (popup / options with a stubbed chrome API)');
   let failed = 0;
   for (const r of results) {
