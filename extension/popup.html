@@ -47,12 +47,15 @@
     <label>Click delay <input type="number" id="clickDelay" min="200" step="100"><span class="u">ms</span></label>
     <label>Maximum new likes <input type="number" id="maxLikesPerRun" min="1" step="1"><span class="u"></span></label>
     <label>Stop after no new posts <input type="number" id="maxNoNewContentAttempts" min="1" step="1"><span class="u">×</span></label>
+    <label>Stop when caught up after <input type="number" id="stopAfterConsecutiveAlreadyLiked" min="0" step="5"><span class="u">old</span></label>
+    <label class="check"><input type="checkbox" id="keepAwakeInBackground"> Keep running in other tabs</label>
     <div class="links">
       <a href="#" id="open-options">All options</a>
       <a href="#" id="reset-stats">Clear session stats</a>
     </div>
   </details>
 
+  <p class="hint" id="keepalive-hint" hidden></p>
   <p class="hint">Press <kbd>Esc</kbd> on the Recognize tab for an emergency stop.</p>
 
   <script src="popup.js"></script>

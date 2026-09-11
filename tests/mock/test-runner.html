@@ -421,6 +421,153 @@
   });
 
   /* =================================================================== */
+  /* CATCHING UP ON A FEED WITH THOUSANDS OF ALREADY-LIKED POSTS          */
+  /* =================================================================== */
+
+  test('21. Stops once caught up, without dragging in the whole history', async function () {
+    // The real shape of day 2 on a 1500-post feed: a few new posts at the top,
+    // then page after page of posts already liked, each loaded only if you keep
+    // scrolling. The win is that those pages are never fetched at all.
+    var initial = [
+      { id: ID(400), liked: false, count: 2 },
+      { id: ID(401), liked: false, count: 0 },
+      { id: ID(402), liked: false, count: 5 }
+    ];
+    for (var i = 410; i < 422; i++) initial.push({ id: ID(i), liked: true, count: i % 6 });
+
+    var batches = [];
+    for (var b = 0; b < 5; b++) {
+      var page = [];
+      for (var j = 0; j < 10; j++) page.push({ id: ID(430 + b * 10 + j), liked: true, count: 3 });
+      batches.push(page);
+    }
+
+    var s = setup({ cards: initial, batches: batches, loadDelay: 100, height: 260 },
+      { stopAfterConsecutiveAlreadyLiked: 20 });
+    var r = await s.engine.start();
+
+    eq(r.reason, 'CAUGHT_UP', 'stopped because the feed is caught up');
+    eq(r.stats.newLikes, 3, 'the three new recognitions were liked first');
+    assert(s.mock.batchesLoaded < 5,
+      'it stopped before loading the whole tail (' + s.mock.batchesLoaded + ' of 5 pages)');
+    assert(r.stats.scanned < 65,
+      'it never had to look at every post (' + r.stats.scanned + ')');
+    assertNoDamage(s.mock);
+  });
+
+  test('22. A new post below already-liked ones resets the caught-up counter', async function () {
+    var cards = [];
+    for (var i = 500; i < 515; i++) cards.push({ id: ID(i), liked: true, count: 3 });
+    cards.push({ id: ID(520), liked: false, count: 1 });   // buried new post
+    for (var j = 530; j < 545; j++) cards.push({ id: ID(j), liked: true, count: 2 });
+
+    var s = setup({ cards: cards, height: 260 }, { stopAfterConsecutiveAlreadyLiked: 10 });
+    var r = await s.engine.start();
+
+    eq(s.mock.clicks[ID(520)], 1, 'the buried new post was still found and liked');
+    eq(r.stats.newLikes, 1, 'exactly one new like');
+    assertNoDamage(s.mock);
+  });
+
+  test('23. Caught-up detection can be switched off', async function () {
+    var cards = [];
+    for (var i = 600; i < 640; i++) cards.push({ id: ID(i), liked: true, count: 1 });
+    cards.push({ id: ID(660), liked: false, count: 0 });   // right at the bottom
+
+    var s = setup({ cards: cards, height: 240 }, { stopAfterConsecutiveAlreadyLiked: 0 });
+    var r = await s.engine.start();
+
+    eq(r.reason, 'END_OF_FEED', 'walked the whole feed');
+    eq(r.stats.scanned, 41, 'saw every recognition');
+    eq(s.mock.clicks[ID(660)], 1, 'and liked the one at the very bottom');
+    assertNoDamage(s.mock);
+  });
+
+  test('24. Fast-forward skims dead stretches without clicking faster', async function () {
+    // A long tail of already-liked posts, loaded page by page as you scroll,
+    // with one unliked post right at the very bottom. This is the stretch that
+    // makes a catch-up run tedious, and the only thing fast-forward changes.
+    function build() {
+      var initial = [];
+      for (var i = 0; i < 10; i++) initial.push({ id: ID(700 + i), liked: true, count: 2 });
+      var batches = [];
+      for (var b = 0; b < 4; b++) {
+        var page = [];
+        for (var j = 0; j < 10; j++) page.push({ id: ID(720 + b * 10 + j), liked: true, count: 3 });
+        batches.push(page);
+      }
+      batches[3].push({ id: ID(790), liked: false, count: 1 });   // the only new one
+      return { cards: initial, batches: batches, loadDelay: 80, height: 240 };
+    }
+
+    var slow = setup(build(), { fastForward: false, stopAfterConsecutiveAlreadyLiked: 0 });
+    var slowRun = await slow.engine.start();
+
+    var fast = setup(build(), {
+      fastForward: true, fastForwardAfter: 1, fastForwardMultiplier: 3,
+      stopAfterConsecutiveAlreadyLiked: 0
+    });
+    var fastRun = await fast.engine.start();
+
+    eq(slow.mock.batchesLoaded, 4, 'the slow pass walked the whole tail');
+    eq(fast.mock.batchesLoaded, 4, 'the fast pass walked it too');
+    eq(slowRun.stats.newLikes, 1, 'the slow pass liked the post at the bottom');
+    eq(fastRun.stats.newLikes, 1, 'the fast pass liked it as well');
+    eq(fastRun.stats.scanned, slowRun.stats.scanned, 'both saw every recognition');
+    // Scroll count, not wall clock: the saving is real and deterministic, while
+    // millisecond timing at test-speed delays is pure noise.
+    assert(fastRun.stats.scrolls < slowRun.stats.scrolls,
+      'fast-forward covered the dead stretch in fewer scrolls (' +
+      fastRun.stats.scrolls + ' vs ' + slowRun.stats.scrolls + ')');
+    eq(fast.mock.totalClicks, slow.mock.totalClicks, 'and clicked exactly as much, no more');
+    assertNoDamage(slow.mock);
+    assertNoDamage(fast.mock);
+  });
+
+  /* =================================================================== */
+  /* BACKGROUND-TAB CATCH-UP                                              */
+  /* =================================================================== */
+
+  test('25. nudge() settles overdue waits but never shortens a live one', async function () {
+    var s = setup({ cards: [
+      { id: ID(800), liked: false, count: 0 },
+      { id: ID(801), liked: false, count: 0 }
+    ] }, { clickDelay: 4000, minPostClickDelay: 4000, maxPostClickDelay: 4000 });
+
+    s.engine.start();
+    await wait(300);
+
+    // A wait is in flight and nowhere near due: nudge must leave it alone.
+    assert(s.engine.pendingWaits() > 0, 'a wait is in flight');
+    var early = s.engine.nudge();
+    eq(early.caughtUp, 0, 'nothing was settled early');
+    eq(s.mock.totalClicks, 0, 'and no click was brought forward');
+
+    s.engine.stop('test cleanup');
+    await s.engine.waitForIdle();
+    assertNoDamage(s.mock);
+  });
+
+  test('26. nudge() reports what it caught up, and a run still completes', async function () {
+    var s = setup({ cards: [
+      { id: ID(810), liked: false, count: 3 },
+      { id: ID(811), liked: true, count: 1 },
+      { id: ID(812), liked: false, count: 0 }
+    ] });
+    // Ping it the way the service worker does, throughout the run.
+    var pinger = setInterval(function () { s.engine.nudge(); }, 40);
+    try {
+      var r = await s.engine.start();
+      eq(r.stats.newLikes, 2, 'the run completed normally while being pinged');
+      eq(r.stats.alreadyLiked, 1, 'and still skipped the already-liked one');
+    } finally {
+      clearInterval(pinger);
+    }
+    eq(s.engine.nudge().caughtUp, 0, 'nothing left pending once stopped');
+    assertNoDamage(s.mock);
+  });
+
+  /* =================================================================== */
   var results = [];
   async function run() {
     for (var i = 0; i < TESTS.length; i++) {

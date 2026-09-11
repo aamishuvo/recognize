@@ -70,6 +70,7 @@
     USER: 'STOPPED_BY_USER',
     MAX_LIKES: 'MAX_LIKES_REACHED',
     END_OF_FEED: 'END_OF_FEED',
+    CAUGHT_UP: 'CAUGHT_UP',
     ERROR: 'ERROR'
   };
 
@@ -82,6 +83,24 @@
     clickDelay: 1200,               // base click delay
     maxLikesPerRun: 100,
     maxNoNewContentAttempts: 5,
+    /*
+     * THE ANSWER TO "I ALREADY LIKED 1500 POSTS AND HAVE TO RELOAD THEM ALL".
+     * A recognition feed is newest-first, so everything new is at the TOP and
+     * everything below a long run of already-liked posts is older and already
+     * handled. Once this many already-liked recognitions are met back to back
+     * with nothing new in between, the run stops: the feed is caught up.
+     * 0 disables it and walks the whole feed as before.
+     */
+    stopAfterConsecutiveAlreadyLiked: 40,
+    /*
+     * When a stretch of feed has nothing to like there is no reason to crawl it
+     * at click pace. Fast-forward scrolls further per step and waits only as
+     * long as new cards need to appear. It changes SCROLLING only - clicks keep
+     * their full randomised pacing and the safety gate is untouched.
+     */
+    fastForward: true,
+    fastForwardAfter: 2,        // scans with nothing to like before speeding up
+    fastForwardMultiplier: 3,   // scroll this many times further while skimming
     // Explicit ranges. Left null, they are derived from the base values above
     // with the ratios below, which reproduce the documented defaults exactly:
     //   clickDelay 1200 -> before 800-1800, after 800-2000
@@ -210,6 +229,8 @@
     var failedIds = new Set();
 
     var stats = blankStats();
+    var consecutiveAlready = 0;   // already-liked met back to back, in feed order
+    var emptyScans = 0;           // consecutive scans with nothing to like
     var scrollContainer = null;
     var observer = null;
     var mutationWaiters = [];
@@ -291,14 +312,45 @@
      * pending timer immediately so STOP is still instant.
      */
     function sleep(ms) {
+      var wait = Math.max(0, ms | 0);
       return new Promise(function (resolve) {
-        var entry = { resolve: resolve };
+        var entry = { resolve: resolve, deadline: Date.now() + wait };
         entry.id = setTimeout(function () {
           timers.delete(entry);
           resolve('elapsed');
-        }, Math.max(0, ms | 0));
+        }, wait);
         timers.add(entry);
       });
+    }
+
+    /**
+     * Fire any wait whose deadline has already passed, and report whether the
+     * run looks throttled.
+     *
+     * Chrome clamps timers in a background tab, so a setTimeout can fire long
+     * after it was due and the run crawls. The MV3 service worker is not
+     * throttled the same way, so it pings us on an alarm and we settle the
+     * waits Chrome already owed us. This can never SHORTEN a wait - a timer is
+     * only resolved once its own deadline is in the past - so click pacing is
+     * completely unchanged.
+     */
+    function nudge() {
+      var now = Date.now();
+      var caughtUp = 0;
+      var overdueBy = 0;
+      timers.forEach(function (entry) {
+        if (entry.deadline != null && entry.deadline <= now) {
+          overdueBy = Math.max(overdueBy, now - entry.deadline);
+          clearTimeout(entry.id);
+          timers.delete(entry);
+          caughtUp++;
+          try { entry.resolve('nudged'); } catch (e) {}
+        }
+      });
+      if (caughtUp) {
+        log('Caught up ' + caughtUp + ' wait(s) that were overdue by ' + overdueBy + 'ms (background throttling)');
+      }
+      return { caughtUp: caughtUp, overdueBy: overdueBy, pending: timers.size };
     }
 
     function cancelTimers() {
@@ -315,9 +367,22 @@
       catch (e) { return []; }
     }
 
-    /** Always re-find by id. A cached element reference is never trusted. */
+    /**
+     * Always re-find by id. A cached element reference is never trusted.
+     *
+     * The direct attribute selector matters once a long feed is loaded: with a
+     * few thousand cards on the page, sweeping every approval link on every
+     * lookup is the difference between instant and visibly sluggish. The id is
+     * validated against SAFE_ID_RE first, so it is safe to interpolate.
+     */
     function findApprovalById(id) {
       if (!id || !SAFE_ID_RE.test(id)) return null;
+      try {
+        var hit = root.querySelector(
+          'a.approval_link[data-category="recognition"][data-event="liked"]' +
+          '[href*="/recognitions/' + id + '/approvals"]');
+        if (hit) return hit;
+      } catch (e) { /* fall through to the sweep */ }
       var all = queryAll(SELECTORS.ANY);
       for (var i = 0; i < all.length; i++) {
         if (recognitionIdOf(all[i]) === id) return all[i];
@@ -461,7 +526,7 @@
       return new Promise(function (resolve) {
         var done = false;
         var settleTimer = null;
-        var entry = { resolve: function () {} };
+        var entry = { resolve: function () {}, deadline: Date.now() + Math.max(0, ms | 0) };
         entry.id = setTimeout(function () {
           if (done) return;
           done = true;
@@ -491,21 +556,28 @@
       var unliked = [];
       var links = queryAll(SELECTORS.ANY);
 
+      // querySelectorAll returns document order, so the run of already-liked
+      // recognitions we count here is genuinely consecutive in the feed.
       links.forEach(function (a) {
         var id = recognitionIdOf(a);
         if (!id) return;
-        if (!seen.has(id)) { seen.add(id); stats.scanned++; }
+        var isNew = !seen.has(id);
+        if (isNew) { seen.add(id); stats.scanned++; }
         if (processed.has(id)) return;
 
         // Broad check first: anything that looks approved is off-limits.
         if (looksApproved(a)) {
           processed.add(id);
           stats.alreadyLiked++;
+          if (isNew) consecutiveAlready++;
           if (history) history.add(id, 'already');
           log('Skipping already liked recognition ' + id);
           return;
         }
-        if (a.matches(SELECTORS.UNLIKED)) unliked.push(id);
+        if (a.matches(SELECTORS.UNLIKED)) {
+          consecutiveAlready = 0;     // something new: we are not caught up
+          unliked.push(id);
+        }
       });
 
       if (links.length) log('Found ' + links.length + ' recognition approval control(s), ' + unliked.length + ' unliked');
@@ -705,6 +777,7 @@
           if (stopRequested) return STOP_REASON.USER;
 
           var batch = scanFeed();
+          emptyScans = batch.length ? 0 : emptyScans + 1;
 
           function nextItem(i) {
             if (i >= batch.length) return Promise.resolve(null);
@@ -726,6 +799,15 @@
             if (stopRequested) return STOP_REASON.USER;
             if (reachedMax()) return STOP_REASON.MAX_LIKES;
 
+            // Caught up: a long unbroken run of posts we had already liked means
+            // everything below is older and handled. Checked AFTER this batch,
+            // so anything new at the top is always liked first.
+            if (settings.stopAfterConsecutiveAlreadyLiked > 0 &&
+                consecutiveAlready >= settings.stopAfterConsecutiveAlreadyLiked) {
+              log('Caught up: ' + consecutiveAlready + ' already-liked recognitions in a row');
+              return STOP_REASON.CAUGHT_UP;
+            }
+
             // ---------------- scroll for more ----------------
             var container = detectScrollContainer();
             var before = scrollMetrics(container);
@@ -733,13 +815,26 @@
               ? settings.scrollAmount
               : Math.max(120, Math.round(before.client * (0.60 + Math.random() * 0.15)));
 
-            log('Scrolling feed by ' + delta + 'px (' + describe(container) + ')');
+            // Nothing to like around here: skim instead of crawling. Only the
+            // scroll changes - no click is ever made faster by this.
+            var skimming = settings.fastForward && emptyScans >= settings.fastForwardAfter;
+            var wait = scrollWaitDelay();
+            if (skimming) {
+              var mult = Math.max(1, settings.fastForwardMultiplier);
+              delta = Math.round(delta * mult);
+              // Never longer than the normal wait: the floor is a sanity guard,
+              // not a reason for "fast" to end up slower than "slow".
+              wait = Math.min(wait, Math.max(300, Math.round(wait / mult)));
+            }
+
+            log((skimming ? 'Fast-forward: scrolling' : 'Scrolling') + ' feed by ' + delta + 'px' +
+                (skimming ? ' (nothing to like here)' : '') + ' (' + describe(container) + ')');
             scrollByPixels(container, delta);
             stats.scrolls++;
             stats.currentRecognitionId = null;
             setState(STATE.WAITING);
 
-            return waitForFeedActivity(scrollWaitDelay()).then(function () {
+            return waitForFeedActivity(wait).then(function () {
               if (stopRequested) return STOP_REASON.USER;
               setState(STATE.RUNNING);
 
@@ -827,6 +922,8 @@
       attempts = Object.create(null);
       notVisiblePasses = Object.create(null);
       stats = blankStats();
+      consecutiveAlready = 0;
+      emptyScans = 0;
       logLines = [];
     }
 
@@ -919,7 +1016,10 @@
       processedIds: function () { return Array.from(processed); },
       failedIds: function () { return Array.from(failedIds); },
       detectScrollContainer: detectScrollContainer,
-      isSafeToLike: isSafeToLike
+      isSafeToLike: isSafeToLike,
+      nudge: nudge,
+      pendingWaits: function () { return timers.size; },
+      consecutiveAlreadyLiked: function () { return consecutiveAlready; }
     };
   }
 
