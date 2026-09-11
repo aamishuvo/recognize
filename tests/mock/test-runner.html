@@ -34,6 +34,7 @@
   <div id="stage"></div>
 
 <script src="../../extension/content/engine.js"></script>
+<script src="../../extension/content/pagination.js"></script>
 <script src="mock-feed.js"></script>
 <script>
 (function () {
@@ -696,6 +697,176 @@
     });
     eq(typeof report.pagination.usable, 'boolean', 'and whether any of it is usable');
     eq(s.mock.totalClicks, 0, 'diagnostics clicked nothing');
+  });
+
+  /* =================================================================== */
+  /* PAGINATED FEED - jump straight to a page instead of scrolling         */
+  /* =================================================================== */
+
+  var PAGES = window.RecognizePagination;
+  // The real markup, taken from a live Recognize grid.
+  var REAL_URL = 'https://recognizeapp.com/banglalink.net/grid' +
+    '?animate=false&filter_by%5B%5D=anniversary&filter_by%5B%5D=recognition';
+
+  function paginationFixture(currentPage, opts) {
+    opts = opts || {};
+    var holder = document.createElement('div');
+    stage.appendChild(holder);
+    var base = currentPage > 1 ? REAL_URL + '&page=' + currentPage : REAL_URL;
+    var html = '<div class="pagination">';
+    (opts.pages || [2, 3, 4, 73, 1791, 1792]).forEach(function (p) {
+      html += '<a href="' + REAL_URL + '&page=' + p + '">' + p + '</a>';
+    });
+    if (opts.next !== null) {
+      html += '<a class="next_page" href="' + REAL_URL + '&page=' +
+              (opts.next || currentPage + 1) + '">Next &rsaquo;</a>';
+    }
+    html += '</div>';
+    holder.innerHTML = html;
+    // A stand-in document whose location is the page we are pretending to be on.
+    var fakeWin = { location: { href: base } };
+    var fakeDoc = {
+      querySelector: function (sel) { return holder.querySelector(sel); },
+      querySelectorAll: function (sel) { return holder.querySelectorAll(sel); },
+      location: { href: base }
+    };
+    return { doc: fakeDoc, win: fakeWin, holder: holder, href: base };
+  }
+
+  test('34. Reads the real Recognize pagination markup', function () {
+    var f = paginationFixture(72, { next: 73 });
+    var info = PAGES.parsePageInfo(f.doc, f.win);
+    eq(info.current, 72, 'current page read from the URL');
+    eq(info.next, 73, 'next page read from a.next_page');
+    eq(info.paginated, true, 'the feed is recognised as paginated');
+    eq(info.last, 1792, 'the last page is read from the pagination block');
+    assert(info.nextUrl.indexOf('page=73') >= 0, 'next url points at page 73');
+    // The filters must survive, or the next page is a different feed.
+    assert(info.nextUrl.indexOf('filter_by') >= 0, 'filters preserved: ' + info.nextUrl);
+  });
+
+  test('35. Page 1 has no page parameter, and URLs keep every filter', function () {
+    var f = paginationFixture(1, { next: 2 });
+    eq(PAGES.parsePageInfo(f.doc, f.win).current, 1, 'a URL with no page param is page 1');
+
+    var built = PAGES.urlForPage(REAL_URL + '&page=72', 73);
+    eq(PAGES.pageOf(built), 73, 'page swapped');
+    eq(built.indexOf('filter_by%5B%5D=anniversary') >= 0, true, 'first filter kept');
+    eq(built.indexOf('filter_by%5B%5D=recognition') >= 0, true, 'second filter kept');
+    eq(built.indexOf('animate=false') >= 0, true, 'other params kept');
+    eq((built.match(/page=/g) || []).length, 1, 'no duplicated page parameter');
+
+    var fresh = PAGES.urlForPage(REAL_URL, 5);
+    eq(PAGES.pageOf(fresh), 5, 'a page param is added when there was none');
+    eq(fresh.indexOf('filter_by') >= 0, true, 'and the filters are still there');
+  });
+
+  /** Drives the runner with a fake engine and fake navigation. */
+  function runnerHarness(opts) {
+    opts = opts || {};
+    var page = opts.startPage || 72;
+    var perPage = opts.likesPerPage || function () { return 2; };
+    var store = { value: null };
+    var navigations = [];
+    var enginePages = [];
+    var f;
+
+    function buildFor(p) { f = paginationFixture(p, { next: opts.lastPage && p >= opts.lastPage ? null : p + 1 }); }
+    buildFor(page);
+
+    var runner = PAGES.createPageRunner({
+      get doc() { return f.doc; },
+      get win() { return f.win; },
+      storage: {
+        get: function () { return Promise.resolve(store.value); },
+        set: function (v) { store.value = JSON.parse(JSON.stringify(v)); return Promise.resolve(); }
+      },
+      navigate: function (url) {
+        navigations.push(url);
+        page = PAGES.pageOf(url);
+        buildFor(page);                                  // "the browser loaded it"
+      },
+      runEngine: function (settings) {
+        enginePages.push({ page: page, settings: settings });
+        var n = perPage(page);
+        return Promise.resolve({
+          reason: 'PAGE_DONE',
+          stats: { newLikes: n, alreadyLiked: 14 - n, skipped: 0, errors: 0, scanned: 14 }
+        });
+      }
+    });
+
+    return {
+      runner: runner, store: store, navigations: navigations, enginePages: enginePages,
+      currentPage: function () { return page; },
+      resumeUntilDone: async function (max) {
+        for (var i = 0; i < (max || 20); i++) {
+          if (store.value && !store.value.active) break;
+          await runner.resume();
+        }
+      }
+    };
+  }
+
+  test('36. Walks page to page, carrying totals across each navigation', async function () {
+    var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 3; } });
+    await h.runner.start({ maxLikesPerRun: 12, stopAfterEmptyPages: 5 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'MAX_LIKES_REACHED', 'it stopped at the like budget');
+    eq(h.store.value.totals.newLikes, 12, 'totals accumulated across pages');
+    eq(h.store.value.pagesDone, 4, 'four pages at three likes each');
+    eq(h.navigations.length, 3, 'three navigations between four pages');
+    assert(h.navigations[0].indexOf('page=73') >= 0, 'first hop went to page 73: ' + h.navigations[0]);
+    assert(h.navigations.every(function (u) { return u.indexOf('filter_by') >= 0; }),
+      'every hop kept the filters');
+    eq(h.enginePages.every(function (e) { return e.settings.scrollForMore === false; }), true,
+      'the engine was told not to scroll for more on any page');
+  });
+
+  test('37. Stops after enough pages with nothing new (caught up)', async function () {
+    var h = runnerHarness({ startPage: 100, likesPerPage: function () { return 0; } });
+    await h.runner.start({ maxLikesPerRun: 500, stopAfterEmptyPages: 3 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'CAUGHT_UP', 'it concluded it is caught up');
+    eq(h.store.value.pagesDone, 3, 'after three empty pages');
+    eq(h.store.value.totals.newLikes, 0, 'having liked nothing');
+  });
+
+  test('38. A run resumes on the page it left off at', async function () {
+    var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 1; } });
+    await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
+
+    // One hop has happened; this is what storage would hold across a reload.
+    eq(h.store.value.active, true, 'the run is still marked active');
+    eq(h.store.value.page, 73, 'and records page 73 as where to continue');
+    eq(h.currentPage(), 73, 'the browser is on page 73');
+
+    // Simulate the content script being rebuilt by the navigation.
+    await h.runner.resume();
+    eq(h.store.value.page, 74, 'resuming carried it on to page 74');
+    eq(h.store.value.totals.newLikes, 2, 'and the earlier page total was not lost');
+  });
+
+  test('39. Stops at the last page instead of running off the end', async function () {
+    var h = runnerHarness({ startPage: 1791, lastPage: 1792, likesPerPage: function () { return 1; } });
+    await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'END_OF_FEED', 'it stopped when there was no next page');
+    assert(h.store.value.pagesDone <= 2, 'after the final page or two');
+  });
+
+  test('40. STOP ends a paginated run and it does not resume', async function () {
+    var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 1; } });
+    await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
+    await h.runner.stop('STOPPED_BY_USER');
+
+    eq(h.store.value.active, false, 'the run is no longer active');
+    var hops = h.navigations.length;
+    await h.runner.resume();
+    eq(h.navigations.length, hops, 'resuming after STOP navigates nowhere');
   });
 
   /* =================================================================== */

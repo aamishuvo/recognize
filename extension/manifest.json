@@ -40,6 +40,7 @@
       "js": [
         "content/engine.js",
         "content/keepalive.js",
+        "content/pagination.js",
         "content/content.js"
       ],
       "css": [

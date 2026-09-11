@@ -20,6 +20,8 @@ const DEFAULT_SETTINGS = {
   pruneProcessedCards: true,
   pruneWhenCardsExceed: 400,
   keepRecentCards: 120,
+  pageMode: true,
+  stopAfterEmptyPages: 5,
   scrollAmount: 700,
   scrollDelay: 1500,
   clickDelay: 1200,

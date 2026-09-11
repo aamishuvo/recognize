@@ -68,6 +68,7 @@
     MAX_LIKES: 'MAX_LIKES_REACHED',
     END_OF_FEED: 'END_OF_FEED',
     CAUGHT_UP: 'CAUGHT_UP',
+    PAGE_DONE: 'PAGE_DONE',
     ERROR: 'ERROR'
   };
 
@@ -99,6 +100,13 @@
     fastForwardAfter: 2,        // scans with nothing to like before speeding up
     fastForwardMultiplier: 3,   // scroll this many times further while skimming
     fastForwardMaxMultiplier: 12, // ...escalating up to this over a long dead stretch
+    /*
+     * When the feed exposes real ?page=N pagination there is no reason to
+     * infinite-scroll at all: load a page, clear it, move to the next. With
+     * this false the run finishes the recognitions on the current page and
+     * ends with PAGE_DONE instead of scrolling for more.
+     */
+    scrollForMore: true,
     /*
      * THE ANSWER TO "THE PAGE HANGS WHILE IT LOADS".
      * An infinite feed never throws anything away, so after a couple of thousand
@@ -890,6 +898,19 @@
                 consecutiveAlready >= settings.stopAfterConsecutiveAlreadyLiked) {
               log('Caught up: ' + consecutiveAlready + ' already-liked recognitions in a row');
               return STOP_REASON.CAUGHT_UP;
+            }
+
+            // -------- page mode: this page is finished, hand back ---------
+            if (!settings.scrollForMore) {
+              // One settle-and-rescan first: these grids render progressively,
+              // so a card can appear a moment after the rest.
+              return sleep(Math.min(1200, scrollWaitDelay())).then(function () {
+                if (stopRequested) return STOP_REASON.USER;
+                if (scanFeed().length) return iteration();   // late arrivals
+                log('Page finished: ' + stats.newLikes + ' new like(s), ' +
+                    stats.alreadyLiked + ' already liked');
+                return STOP_REASON.PAGE_DONE;
+              });
             }
 
             // ---------------- scroll for more ----------------

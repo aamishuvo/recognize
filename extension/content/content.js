@@ -91,6 +91,57 @@
   var keepAlive = window.__ralKeepAlive || null;
   var keepAliveWanted = false;
 
+  /* ------------------------------------------------------ paginated runs */
+  var PAGES = window.RecognizePagination || null;
+  var pageRunner = null;
+  var pageState = null;
+
+  function pageStorage() {
+    return {
+      get: function () {
+        return new Promise(function (resolve) {
+          chrome.storage.local.get(PAGES.STATE_KEY, function (d) {
+            resolve((d && d[PAGES.STATE_KEY]) || null);
+          });
+        });
+      },
+      set: function (state) {
+        return new Promise(function (resolve) {
+          var payload = {};
+          payload[PAGES.STATE_KEY] = state;
+          chrome.storage.local.set(payload, function () { resolve(); });
+        });
+      }
+    };
+  }
+
+  function ensurePageRunner(settings) {
+    if (pageRunner) return pageRunner;
+    pageRunner = PAGES.createPageRunner({
+      doc: document,
+      win: window,
+      storage: pageStorage(),
+      navigate: function (url) {
+        flushHistory();
+        // A real navigation: this content script is about to be torn down, and
+        // the next page's copy picks the run back up from storage.
+        location.href = url;
+      },
+      runEngine: function (pageSettings) {
+        var eng = ensureEngine(Object.assign({}, settings, pageSettings));
+        eng.updateSettings(pageSettings);
+        keepAliveWanted = settings.keepAwakeInBackground !== false;
+        return eng.start(pageSettings);
+      },
+      onUpdate: function (state) {
+        pageState = state;
+        pushStatus(engine ? engine.snapshot() : null);
+      },
+      log: function (m) { if (settings && settings.debug) console.log('[RecognizeAutoLiker] ' + m); }
+    });
+    return pageRunner;
+  }
+
   /** Hold the tab awake only while a run is actually in progress. */
   function syncKeepAlive(state) {
     if (!keepAlive) return;
@@ -138,6 +189,8 @@
       settings: snap.settings,
       lastResult: snap.lastResult,
       keepAlive: keepAlive ? keepAlive.status() : { supported: false, active: false },
+      pagination: PAGES ? PAGES.parsePageInfo(document, window) : null,
+      pageRun: pageState,
       url: location.href,
       updatedAt: Date.now()
     };
@@ -232,7 +285,13 @@
 
       switch (msg.command) {
         case 'START':
-          eng.start(settings);
+          if (PAGES && settings.pageMode !== false && PAGES.parsePageInfo(document, window).paginated) {
+            // Real pagination beats infinite scrolling: small fresh pages, and
+            // progress that survives a reload.
+            ensurePageRunner(settings).start(settings);
+          } else {
+            eng.start(settings);
+          }
           syncKeepAlive(eng.getState());
           break;
         case 'PAUSE':
@@ -243,6 +302,10 @@
           break;
         case 'STOP':
           eng.stop('popup STOP');
+          if (pageRunner) pageRunner.stop('STOPPED_BY_USER');
+          else if (PAGES) pageStorage().get().then(function (st) {
+            if (st && st.active) { st.active = false; st.lastReason = 'STOPPED_BY_USER'; pageStorage().set(st); }
+          });
           syncKeepAlive('STOPPED');
           flushHistory();
           break;
@@ -269,5 +332,16 @@
     ensureEngine(stored);
     pushStatus(engine.snapshot());
     if (stored && stored.debug) console.log('[RecognizeAutoLiker] content script ready on ' + location.host);
+
+    // If a paginated run was in progress when the last page navigated away,
+    // pick it straight back up. Give the grid a moment to render first.
+    if (!PAGES) return;
+    pageStorage().get().then(function (state) {
+      if (!state || !state.active) return;
+      pageState = state;
+      setTimeout(function () {
+        ensurePageRunner(Object.assign({}, stored, state.settings || {})).resume();
+      }, 1200);
+    });
   });
 })();
