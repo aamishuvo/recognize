@@ -34,6 +34,7 @@
   <div id="stage"></div>
 
 <script src="../../extension/content/engine.js"></script>
+<script src="../../extension/content/pagination.js"></script>
 <script src="mock-feed.js"></script>
 <script>
 (function () {
@@ -522,6 +523,350 @@
     eq(fast.mock.totalClicks, slow.mock.totalClicks, 'and clicked exactly as much, no more');
     assertNoDamage(slow.mock);
     assertNoDamage(fast.mock);
+  });
+
+  /* =================================================================== */
+  /* KEEPING A HUGE FEED FROM HANGING THE TAB                             */
+  /* =================================================================== */
+
+  test('27. Prunes finished cards so the DOM stops growing without limit', async function () {
+    // 40 cards up front, then 12 pages of 20 - the shape that ends up with
+    // thousands of nodes on a real catch-up run.
+    var initial = [];
+    for (var i = 0; i < 40; i++) initial.push({ id: ID(1000 + i), liked: true, count: 2 });
+    var batches = [];
+    for (var b = 0; b < 12; b++) {
+      var page = [];
+      for (var j = 0; j < 20; j++) page.push({ id: ID(1100 + b * 20 + j), liked: true, count: 1 });
+      batches.push(page);
+    }
+
+    var s = setup({ cards: initial, batches: batches, loadDelay: 60, height: 240 }, {
+      stopAfterConsecutiveAlreadyLiked: 0,        // walk the whole thing
+      pruneProcessedCards: true, pruneWhenCardsExceed: 60, keepRecentCards: 30
+    });
+    var r = await s.engine.start();
+
+    var stillInDom = s.host.querySelectorAll('li.recognition').length;
+    eq(r.stats.scanned, 280, 'it saw all 280 recognitions');
+    assert(r.stats.pruned > 0, 'it pruned finished cards (' + r.stats.pruned + ')');
+    assert(stillInDom < 280, 'the DOM is far smaller than the feed (' + stillInDom + ' of 280)');
+    assert(stillInDom <= 120, 'and stays bounded rather than growing forever (' + stillInDom + ')');
+    eq(r.reason, 'END_OF_FEED', 'and it still reached the end of the feed properly');
+    assertNoDamage(s.mock);
+  });
+
+  test('28. Pruning never removes an unfinished or on-screen card', async function () {
+    // A new post is buried deep in the tail: pruning must not take it away
+    // before it has been liked.
+    var initial = [];
+    for (var i = 0; i < 40; i++) initial.push({ id: ID(2000 + i), liked: true, count: 1 });
+    var batches = [];
+    for (var b = 0; b < 6; b++) {
+      var page = [];
+      for (var j = 0; j < 20; j++) page.push({ id: ID(2100 + b * 20 + j), liked: true, count: 2 });
+      batches.push(page);
+    }
+    batches[4][10] = { id: ID(2500), liked: false, count: 3 };   // the only new one
+
+    var s = setup({ cards: initial, batches: batches, loadDelay: 60, height: 240 }, {
+      stopAfterConsecutiveAlreadyLiked: 0,
+      pruneProcessedCards: true, pruneWhenCardsExceed: 50, keepRecentCards: 25
+    });
+    var r = await s.engine.start();
+
+    eq(s.mock.clicks[ID(2500)], 1, 'the buried new post was still found and liked');
+    eq(r.stats.newLikes, 1, 'exactly one new like');
+    assert(r.stats.pruned > 0, 'pruning did happen alongside it');
+    assertNoDamage(s.mock);
+  });
+
+  test('29. Pruning keeps the scroll position steady', async function () {
+    var cards = [];
+    for (var i = 0; i < 120; i++) cards.push({ id: ID(3000 + i), liked: true, count: 1 });
+    // First pass with pruning OFF, purely to mark every card as finished with -
+    // otherwise the run prunes the feed below the threshold and there is
+    // nothing left for the measurement below to remove.
+    var s = setup({ cards: cards, height: 240 }, {
+      pruneProcessedCards: false, stopAfterConsecutiveAlreadyLiked: 0
+    });
+    await s.engine.start();
+    eq(s.host.querySelectorAll('li.recognition').length, 120, 'all 120 cards still present');
+
+    s.engine.updateSettings({
+      pruneProcessedCards: true, pruneWhenCardsExceed: 40, keepRecentCards: 20
+    });
+    s.mock.root.scrollTop = Math.round(s.mock.root.scrollHeight / 2);
+    await wait(50);
+
+    var anchorBefore = s.host.querySelectorAll('li.recognition');
+    var refId = anchorBefore.length
+      ? anchorBefore[anchorBefore.length - 1].getAttribute('data-recognition-id') : null;
+    var topBefore = refId
+      ? s.host.querySelector('li[data-recognition-id="' + refId + '"]').getBoundingClientRect().top : null;
+
+    var removed = s.engine.pruneNow();
+    assert(removed > 0, 'something was pruned (' + removed + ')');
+
+    var refEl = refId ? s.host.querySelector('li[data-recognition-id="' + refId + '"]') : null;
+    assert(!!refEl, 'the reference card survived');
+    var topAfter = refEl.getBoundingClientRect().top;
+    assert(Math.abs(topAfter - topBefore) <= 4,
+      'the view did not jump (moved ' + Math.round(topAfter - topBefore) + 'px)');
+    assertNoDamage(s.mock);
+  });
+
+  test('30. Pruning can be switched off', async function () {
+    var cards = [];
+    for (var i = 0; i < 80; i++) cards.push({ id: ID(4000 + i), liked: true, count: 1 });
+    var s = setup({ cards: cards, height: 240 }, {
+      pruneProcessedCards: false, stopAfterConsecutiveAlreadyLiked: 0
+    });
+    var r = await s.engine.start();
+    eq(r.stats.pruned, 0, 'nothing was pruned');
+    eq(s.host.querySelectorAll('li.recognition').length, 80, 'every card is still in the DOM');
+    assertNoDamage(s.mock);
+  });
+
+  test('31. A slow-loading feed is not mistaken for the end of the feed', async function () {
+    // The exact failure: at the bottom of the feed, waiting for the next page.
+    // Fast-forward shortens the wait, the page has not arrived yet, and each
+    // short wait was counted as evidence that the feed had ended - so the run
+    // died partway down with END_OF_FEED.
+    var initial = [];
+    for (var i = 0; i < 10; i++) initial.push({ id: ID(5000 + i), liked: true, count: 1 });
+    var batches = [];
+    for (var b = 0; b < 3; b++) {
+      var page = [];
+      for (var j = 0; j < 10; j++) page.push({ id: ID(5100 + b * 10 + j), liked: true, count: 2 });
+      batches.push(page);
+    }
+    batches[2].push({ id: ID(5900), liked: false, count: 4 });   // the prize, at the bottom
+
+    var s = setup({
+      cards: initial, batches: batches,
+      loadDelay: 1500,          // far slower than any skimming wait
+      height: 240
+    }, {
+      scrollDelay: 300, fastForward: true, fastForwardAfter: 1,
+      fastForwardMultiplier: 4, maxNoNewContentAttempts: 3,
+      stopAfterConsecutiveAlreadyLiked: 0, pruneProcessedCards: false
+    });
+
+    var r = await s.engine.start();
+
+    eq(s.mock.batchesLoaded, 3, 'every page was eventually loaded despite the slow feed');
+    eq(s.mock.clicks[ID(5900)], 1, 'the post at the very bottom was reached and liked');
+    eq(r.stats.newLikes, 1, 'exactly one new like');
+    eq(r.reason, 'END_OF_FEED', 'and it ended only once the feed was genuinely exhausted');
+    assertNoDamage(s.mock);
+  });
+
+  test('32. Fast-forward jumps further the longer a dead stretch runs', async function () {
+    var cards = [];
+    for (var i = 0; i < 200; i++) cards.push({ id: ID(6000 + i), liked: true, count: 1 });
+
+    var flat = setup({ cards: cards, height: 240 }, {
+      fastForward: true, fastForwardAfter: 1,
+      fastForwardMultiplier: 2, fastForwardMaxMultiplier: 2,   // no escalation
+      stopAfterConsecutiveAlreadyLiked: 0, pruneProcessedCards: false
+    });
+    var flatRun = await flat.engine.start();
+
+    var escalating = setup({ cards: cards, height: 240 }, {
+      fastForward: true, fastForwardAfter: 1,
+      fastForwardMultiplier: 2, fastForwardMaxMultiplier: 16,  // escalates
+      stopAfterConsecutiveAlreadyLiked: 0, pruneProcessedCards: false
+    });
+    var escRun = await escalating.engine.start();
+
+    eq(escRun.stats.scanned, flatRun.stats.scanned, 'both saw all 200 recognitions');
+    assert(escRun.stats.scrolls < flatRun.stats.scrolls,
+      'escalating covered the same ground in fewer scrolls (' +
+      escRun.stats.scrolls + ' vs ' + flatRun.stats.scrolls + ')');
+    eq(escalating.mock.totalClicks, 0, 'and clicked nothing, since there was nothing to like');
+    assertNoDamage(escalating.mock);
+  });
+
+  test('33. Diagnostics report whether the feed can be jumped into', function () {
+    var s = setup({ cards: [{ id: ID(7000), liked: false, count: 1 }] });
+    var report = s.engine.diagnose();
+    assert(!!report.pagination, 'a pagination section is reported');
+    ['pageLinks', 'nextLinks', 'loadMore', 'cursorAttributes', 'urlParams'].forEach(function (k) {
+      assert(Array.isArray(report.pagination[k]), 'pagination.' + k + ' is reported');
+    });
+    eq(typeof report.pagination.usable, 'boolean', 'and whether any of it is usable');
+    eq(s.mock.totalClicks, 0, 'diagnostics clicked nothing');
+  });
+
+  /* =================================================================== */
+  /* PAGINATED FEED - jump straight to a page instead of scrolling         */
+  /* =================================================================== */
+
+  var PAGES = window.RecognizePagination;
+  // The real markup, taken from a live Recognize grid.
+  var REAL_URL = 'https://recognizeapp.com/banglalink.net/grid' +
+    '?animate=false&filter_by%5B%5D=anniversary&filter_by%5B%5D=recognition';
+
+  function paginationFixture(currentPage, opts) {
+    opts = opts || {};
+    var holder = document.createElement('div');
+    stage.appendChild(holder);
+    var base = currentPage > 1 ? REAL_URL + '&page=' + currentPage : REAL_URL;
+    var html = '<div class="pagination">';
+    (opts.pages || [2, 3, 4, 73, 1791, 1792]).forEach(function (p) {
+      html += '<a href="' + REAL_URL + '&page=' + p + '">' + p + '</a>';
+    });
+    if (opts.next !== null) {
+      html += '<a class="next_page" href="' + REAL_URL + '&page=' +
+              (opts.next || currentPage + 1) + '">Next &rsaquo;</a>';
+    }
+    html += '</div>';
+    holder.innerHTML = html;
+    // A stand-in document whose location is the page we are pretending to be on.
+    var fakeWin = { location: { href: base } };
+    var fakeDoc = {
+      querySelector: function (sel) { return holder.querySelector(sel); },
+      querySelectorAll: function (sel) { return holder.querySelectorAll(sel); },
+      location: { href: base }
+    };
+    return { doc: fakeDoc, win: fakeWin, holder: holder, href: base };
+  }
+
+  test('34. Reads the real Recognize pagination markup', function () {
+    var f = paginationFixture(72, { next: 73 });
+    var info = PAGES.parsePageInfo(f.doc, f.win);
+    eq(info.current, 72, 'current page read from the URL');
+    eq(info.next, 73, 'next page read from a.next_page');
+    eq(info.paginated, true, 'the feed is recognised as paginated');
+    eq(info.last, 1792, 'the last page is read from the pagination block');
+    assert(info.nextUrl.indexOf('page=73') >= 0, 'next url points at page 73');
+    // The filters must survive, or the next page is a different feed.
+    assert(info.nextUrl.indexOf('filter_by') >= 0, 'filters preserved: ' + info.nextUrl);
+  });
+
+  test('35. Page 1 has no page parameter, and URLs keep every filter', function () {
+    var f = paginationFixture(1, { next: 2 });
+    eq(PAGES.parsePageInfo(f.doc, f.win).current, 1, 'a URL with no page param is page 1');
+
+    var built = PAGES.urlForPage(REAL_URL + '&page=72', 73);
+    eq(PAGES.pageOf(built), 73, 'page swapped');
+    eq(built.indexOf('filter_by%5B%5D=anniversary') >= 0, true, 'first filter kept');
+    eq(built.indexOf('filter_by%5B%5D=recognition') >= 0, true, 'second filter kept');
+    eq(built.indexOf('animate=false') >= 0, true, 'other params kept');
+    eq((built.match(/page=/g) || []).length, 1, 'no duplicated page parameter');
+
+    var fresh = PAGES.urlForPage(REAL_URL, 5);
+    eq(PAGES.pageOf(fresh), 5, 'a page param is added when there was none');
+    eq(fresh.indexOf('filter_by') >= 0, true, 'and the filters are still there');
+  });
+
+  /** Drives the runner with a fake engine and fake navigation. */
+  function runnerHarness(opts) {
+    opts = opts || {};
+    var page = opts.startPage || 72;
+    var perPage = opts.likesPerPage || function () { return 2; };
+    var store = { value: null };
+    var navigations = [];
+    var enginePages = [];
+    var f;
+
+    function buildFor(p) { f = paginationFixture(p, { next: opts.lastPage && p >= opts.lastPage ? null : p + 1 }); }
+    buildFor(page);
+
+    var runner = PAGES.createPageRunner({
+      get doc() { return f.doc; },
+      get win() { return f.win; },
+      storage: {
+        get: function () { return Promise.resolve(store.value); },
+        set: function (v) { store.value = JSON.parse(JSON.stringify(v)); return Promise.resolve(); }
+      },
+      navigate: function (url) {
+        navigations.push(url);
+        page = PAGES.pageOf(url);
+        buildFor(page);                                  // "the browser loaded it"
+      },
+      runEngine: function (settings) {
+        enginePages.push({ page: page, settings: settings });
+        var n = perPage(page);
+        return Promise.resolve({
+          reason: 'PAGE_DONE',
+          stats: { newLikes: n, alreadyLiked: 14 - n, skipped: 0, errors: 0, scanned: 14 }
+        });
+      }
+    });
+
+    return {
+      runner: runner, store: store, navigations: navigations, enginePages: enginePages,
+      currentPage: function () { return page; },
+      resumeUntilDone: async function (max) {
+        for (var i = 0; i < (max || 20); i++) {
+          if (store.value && !store.value.active) break;
+          await runner.resume();
+        }
+      }
+    };
+  }
+
+  test('36. Walks page to page, carrying totals across each navigation', async function () {
+    var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 3; } });
+    await h.runner.start({ maxLikesPerRun: 12, stopAfterEmptyPages: 5 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'MAX_LIKES_REACHED', 'it stopped at the like budget');
+    eq(h.store.value.totals.newLikes, 12, 'totals accumulated across pages');
+    eq(h.store.value.pagesDone, 4, 'four pages at three likes each');
+    eq(h.navigations.length, 3, 'three navigations between four pages');
+    assert(h.navigations[0].indexOf('page=73') >= 0, 'first hop went to page 73: ' + h.navigations[0]);
+    assert(h.navigations.every(function (u) { return u.indexOf('filter_by') >= 0; }),
+      'every hop kept the filters');
+    eq(h.enginePages.every(function (e) { return e.settings.scrollForMore === false; }), true,
+      'the engine was told not to scroll for more on any page');
+  });
+
+  test('37. Stops after enough pages with nothing new (caught up)', async function () {
+    var h = runnerHarness({ startPage: 100, likesPerPage: function () { return 0; } });
+    await h.runner.start({ maxLikesPerRun: 500, stopAfterEmptyPages: 3 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'CAUGHT_UP', 'it concluded it is caught up');
+    eq(h.store.value.pagesDone, 3, 'after three empty pages');
+    eq(h.store.value.totals.newLikes, 0, 'having liked nothing');
+  });
+
+  test('38. A run resumes on the page it left off at', async function () {
+    var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 1; } });
+    await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
+
+    // One hop has happened; this is what storage would hold across a reload.
+    eq(h.store.value.active, true, 'the run is still marked active');
+    eq(h.store.value.page, 73, 'and records page 73 as where to continue');
+    eq(h.currentPage(), 73, 'the browser is on page 73');
+
+    // Simulate the content script being rebuilt by the navigation.
+    await h.runner.resume();
+    eq(h.store.value.page, 74, 'resuming carried it on to page 74');
+    eq(h.store.value.totals.newLikes, 2, 'and the earlier page total was not lost');
+  });
+
+  test('39. Stops at the last page instead of running off the end', async function () {
+    var h = runnerHarness({ startPage: 1791, lastPage: 1792, likesPerPage: function () { return 1; } });
+    await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'END_OF_FEED', 'it stopped when there was no next page');
+    assert(h.store.value.pagesDone <= 2, 'after the final page or two');
+  });
+
+  test('40. STOP ends a paginated run and it does not resume', async function () {
+    var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 1; } });
+    await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
+    await h.runner.stop('STOPPED_BY_USER');
+
+    eq(h.store.value.active, false, 'the run is no longer active');
+    var hops = h.navigations.length;
+    await h.runner.resume();
+    eq(h.navigations.length, hops, 'resuming after STOP navigates nowhere');
   });
 
   /* =================================================================== */

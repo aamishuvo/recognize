@@ -55,6 +55,7 @@
     MAX_LIKES: 'MAX_LIKES_REACHED',
     END_OF_FEED: 'END_OF_FEED',
     CAUGHT_UP: 'CAUGHT_UP',
+    PAGE_DONE: 'PAGE_DONE',
     ERROR: 'ERROR'
   };
 
@@ -85,6 +86,27 @@
     fastForward: true,
     fastForwardAfter: 2,        // scans with nothing to like before speeding up
     fastForwardMultiplier: 3,   // scroll this many times further while skimming
+    fastForwardMaxMultiplier: 12, // ...escalating up to this over a long dead stretch
+    /*
+     * When the feed exposes real ?page=N pagination there is no reason to
+     * infinite-scroll at all: load a page, clear it, move to the next. With
+     * this false the run finishes the recognitions on the current page and
+     * ends with PAGE_DONE instead of scrolling for more.
+     */
+    scrollForMore: true,
+    /*
+     * THE ANSWER TO "THE PAGE HANGS WHILE IT LOADS".
+     * An infinite feed never throws anything away, so after a couple of thousand
+     * cards the tab is holding thousands of avatars and DOM nodes and Chrome
+     * grinds to a halt. Once the page is carrying more than pruneWhenCardsExceed
+     * recognitions, cards we have already finished with and that are scrolled
+     * well above the viewport are removed, keeping the most recent
+     * keepRecentCards intact. Only already-processed, off-screen cards are ever
+     * touched, and the scroll position is corrected so the view does not jump.
+     */
+    pruneProcessedCards: true,
+    pruneWhenCardsExceed: 400,
+    keepRecentCards: 120,
     // Explicit ranges. Left null, they are derived from the base values above
     // with the ratios below, which reproduce the documented defaults exactly:
     //   clickDelay 1200 -> before 800-1800, after 800-2000
@@ -229,6 +251,7 @@
         skipped: 0,
         errors: 0,         // verification failures + exceptions
         scrolls: 0,
+        pruned: 0,
         currentRecognitionId: null,
         startedAt: null,
         finishedAt: null
@@ -535,6 +558,88 @@
       });
     }
 
+    /* ============================ PRUNE ================================= */
+    /**
+     * Drop cards we are completely done with, to keep the tab responsive on a
+     * feed with thousands of posts.
+     *
+     * Rules, in order of importance:
+     *   - only cards whose recognition id is in `processed` (finished with);
+     *   - only cards entirely ABOVE the viewport, never anything on screen or
+     *     below it;
+     *   - never the most recent `keepRecentCards`, so the feed's own lazy
+     *     loader always has plenty of context left;
+     *   - all measurements are taken BEFORE any removal, so we never thrash
+     *     layout by interleaving reads and writes.
+     *
+     * The visible scroll position is preserved by anchoring on the first card
+     * that survives: whatever it moved by, we move the scroll by the same
+     * amount. That is correct whether or not Chrome's own scroll anchoring
+     * also fires.
+     */
+    function pruneOldCards(container) {
+      if (!settings.pruneProcessedCards) return 0;
+
+      var links = queryAll(SELECTORS.ANY);
+      if (links.length <= settings.pruneWhenCardsExceed) return 0;
+
+      var limit = links.length - settings.keepRecentCards;
+      if (limit <= 0) return 0;
+
+      // "Above the viewport" means above the TOP OF THE FEED CONTAINER, not the
+      // top of the window. The feed is usually an inner scrolling div that
+      // starts partway down the page (or below the fold entirely), so
+      // comparing against 0 would either prune nothing at all or stop far too
+      // early.
+      var boundaryTop = 0;
+      if (container && container !== win) {
+        try { boundaryTop = container.getBoundingClientRect().top; } catch (e) { boundaryTop = 0; }
+      }
+
+      // --- read phase: decide everything before touching the DOM ---
+      var doomed = [];
+      for (var i = 0; i < limit; i++) {
+        var link = links[i];
+        var id = recognitionIdOf(link);
+        if (!id || !processed.has(id)) continue;       // not finished with it
+        var card = cardOf(link);
+        if (!card || card === root || card === container) continue;
+        var rect;
+        try { rect = card.getBoundingClientRect(); } catch (e) { continue; }
+        if (rect.bottom >= boundaryTop) break;         // reached the visible feed
+        doomed.push(card);
+      }
+      if (!doomed.length) return 0;
+
+      // Anchor on the first card that survives, so we can restore the view.
+      var anchor = null, anchorTop = 0;
+      var survivors = queryAll(SELECTORS.ANY);
+      for (var j = 0; j < survivors.length; j++) {
+        var c = cardOf(survivors[j]);
+        if (c && doomed.indexOf(c) === -1) {
+          anchor = c;
+          try { anchorTop = c.getBoundingClientRect().top; } catch (e) { anchor = null; }
+          break;
+        }
+      }
+
+      // --- write phase ---
+      for (var k = 0; k < doomed.length; k++) {
+        try { doomed[k].remove(); } catch (e) {}
+      }
+
+      if (anchor && anchor.isConnected) {
+        try {
+          var shift = anchor.getBoundingClientRect().top - anchorTop;
+          if (Math.abs(shift) > 1) scrollByPixels(container, shift);
+        } catch (e) {}
+      }
+
+      stats.pruned += doomed.length;
+      log('Pruned ' + doomed.length + ' finished card(s) above the viewport to keep the page responsive');
+      return doomed.length;
+    }
+
     /* ============================ SCAN ================================== */
     function scanFeed() {
       var unliked = [];
@@ -741,17 +846,7 @@
 
     function runLoop() {
       var noNewContent = 0;
-      var lastCardCount = countRecognitions();
-      var lastScrollHeight = scrollMetrics(detectScrollContainer()).height;
-
-      function countRecognitions() {
-        var ids = new Set();
-        queryAll(SELECTORS.ANY).forEach(function (a) {
-          var id = recognitionIdOf(a);
-          if (id) ids.add(id);
-        });
-        return ids.size;
-      }
+      var skimGrace = false;   // a miss while skimming buys one full-speed retry
 
       function iteration() {
         if (stopRequested) return Promise.resolve(STOP_REASON.USER);
@@ -792,8 +887,27 @@
               return STOP_REASON.CAUGHT_UP;
             }
 
+            // -------- page mode: this page is finished, hand back ---------
+            if (!settings.scrollForMore) {
+              // One settle-and-rescan first: these grids render progressively,
+              // so a card can appear a moment after the rest.
+              return sleep(Math.min(1200, scrollWaitDelay())).then(function () {
+                if (stopRequested) return STOP_REASON.USER;
+                if (scanFeed().length) return iteration();   // late arrivals
+                log('Page finished: ' + stats.newLikes + ' new like(s), ' +
+                    stats.alreadyLiked + ' already liked');
+                return STOP_REASON.PAGE_DONE;
+              });
+            }
+
             // ---------------- scroll for more ----------------
             var container = detectScrollContainer();
+
+            // Let go of finished cards BEFORE measuring, so the before/after
+            // comparison below is taken on the same, already-pruned page.
+            pruneOldCards(container);
+
+            var scannedBefore = stats.scanned;
             var before = scrollMetrics(container);
             var delta = settings.scrollAmount > 0
               ? settings.scrollAmount
@@ -801,14 +915,32 @@
 
             // Nothing to like around here: skim instead of crawling. Only the
             // scroll changes - no click is ever made faster by this.
-            var skimming = settings.fastForward && emptyScans >= settings.fastForwardAfter;
+            // Skim only while we are confident there is more feed below us.
+            // After any miss we go back to full speed before drawing
+            // conclusions, because a shortened wait is not evidence of anything.
+            var skimming = settings.fastForward &&
+                           emptyScans >= settings.fastForwardAfter &&
+                           noNewContent === 0 &&
+                           !skimGrace;
             var wait = scrollWaitDelay();
+
             if (skimming) {
-              var mult = Math.max(1, settings.fastForwardMultiplier);
+              // The longer the dead stretch, the bigger the jumps. Walking a
+              // couple of thousand already-liked posts at one screen per step
+              // is the slow part of a catch-up run.
+              var steps = Math.max(1, Math.floor(emptyScans / Math.max(1, settings.fastForwardAfter)));
+              var mult = Math.min(
+                Math.max(1, settings.fastForwardMaxMultiplier),
+                Math.max(1, settings.fastForwardMultiplier) * steps
+              );
               delta = Math.round(delta * mult);
               // Never longer than the normal wait: the floor is a sanity guard,
               // not a reason for "fast" to end up slower than "slow".
               wait = Math.min(wait, Math.max(300, Math.round(wait / mult)));
+            } else if (noNewContent > 0) {
+              // Each consecutive miss waits longer. A feed that is merely slow
+              // to hand over the next page should not look like the end of it.
+              wait = Math.round(wait * (1 + noNewContent * 0.75));
             }
 
             log((skimming ? 'Fast-forward: scrolling' : 'Scrolling') + ' feed by ' + delta + 'px' +
@@ -823,23 +955,31 @@
               setState(STATE.RUNNING);
 
               var after = scrollMetrics(container);
-              var cards = countRecognitions();
-              var pending = scanFeed().length;
+              var pending = scanFeed().length;   // this is what updates stats.scanned
 
-              var grewCards = cards > lastCardCount;
-              var grewHeight = after.height > lastScrollHeight + 4;
+              // Prune-safe signals only. stats.scanned counts distinct
+              // recognitions ever seen, so it never goes down; heights are
+              // compared within this one iteration rather than against an
+              // all-time maximum that pruning would invalidate.
+              var foundMore = stats.scanned > scannedBefore;
+              var grewHeight = after.height > before.height + 4;
               var moved = Math.abs(after.top - before.top) > 2;
               var atBottom = after.top + after.client >= after.height - 8;
 
-              if (grewCards || grewHeight || pending > 0 || (moved && !atBottom)) {
+              if (foundMore || grewHeight || pending > 0 || (moved && !atBottom)) {
                 noNewContent = 0;
+                skimGrace = false;
+              } else if (skimming) {
+                // We were skimming with a deliberately short wait, so this miss
+                // proves nothing: the feed may simply be slower than the wait.
+                // Retry the same spot at full speed before counting it.
+                skimGrace = true;
+                log('Nothing new after a fast scroll - retrying at full speed before calling it the end');
               } else {
                 noNewContent++;
+                skimGrace = false;
                 log('No new content (' + noNewContent + '/' + settings.maxNoNewContentAttempts + ')');
               }
-
-              lastCardCount = Math.max(lastCardCount, cards);
-              lastScrollHeight = Math.max(lastScrollHeight, after.height);
 
               if (noNewContent >= settings.maxNoNewContentAttempts) return STOP_REASON.END_OF_FEED;
 
@@ -872,12 +1012,72 @@
         viewportHeight: m.client,
         scrollTop: m.top,
         cardOutline: unliked.length ? outline(unliked[0]) : [],
+        pagination: detectPagination(),
         selectors: SELECTORS
       };
 
       log('Diagnostic: ' + report.unlikedCount + ' unliked, ' + report.likedCount +
           ' already liked, container ' + report.scrollContainer);
+
+      try {
+        console.group('[RecognizeAutoLiker] Feed navigation options');
+        if (report.pagination.usable) {
+          console.log('This feed appears to expose a way to jump directly. Details:');
+        } else {
+          console.log('No pagination, "load more" control or cursor attribute found.');
+          console.log('That means the feed can only be walked sequentially - there is no');
+          console.log('way to resume partway down without loading what comes before it.');
+        }
+        console.log(report.pagination);
+        console.groupEnd();
+      } catch (e) {}
+
       return report;
+    }
+
+    /**
+     * Looks for a way to jump straight to a point in the feed instead of
+     * scrolling there. An infinite feed can only be walked sequentially unless
+     * the site exposes pages or a cursor, so this reports whatever it finds and
+     * lets a human decide whether it is usable. It never follows anything.
+     */
+    function detectPagination() {
+      var found = { pageLinks: [], nextLinks: [], loadMore: [], cursorAttributes: [], urlParams: [] };
+
+      try {
+        queryAll('a[href*="page="], a[href*="per_page="], a[href*="offset="]').slice(0, 8)
+          .forEach(function (a) { found.pageLinks.push(a.getAttribute('href')); });
+
+        queryAll('a[rel="next"], link[rel="next"], [data-next-page], [data-next-url]').slice(0, 5)
+          .forEach(function (el) {
+            found.nextLinks.push(el.getAttribute('href') || el.getAttribute('data-next-url') || describe(el));
+          });
+
+        // Text-based "load more" affordances, matched loosely on purpose.
+        queryAll('a, button').forEach(function (el) {
+          if (found.loadMore.length >= 5) return;
+          var text = (el.textContent || '').trim().toLowerCase();
+          if (!text || text.length > 40) return;
+          if (/load more|show more|see more|older|view more|next page/.test(text)) {
+            found.loadMore.push(text + '  ->  ' + describe(el));
+          }
+        });
+
+        ['data-page', 'data-cursor', 'data-offset', 'data-last-id', 'data-oldest', 'data-before']
+          .forEach(function (attr) {
+            var el = root.querySelector('[' + attr + ']');
+            if (el) found.cursorAttributes.push(attr + '="' + el.getAttribute(attr) + '" on ' + describe(el));
+          });
+
+        var qs = (doc.location && doc.location.search) || '';
+        if (qs) qs.replace(/^\?/, '').split('&').forEach(function (pair) {
+          if (pair) found.urlParams.push(pair);
+        });
+      } catch (e) { /* diagnostics must never throw */ }
+
+      found.usable = !!(found.pageLinks.length || found.nextLinks.length ||
+                        found.loadMore.length || found.cursorAttributes.length);
+      return found;
     }
 
     function outline(el) {
@@ -1003,7 +1203,8 @@
       isSafeToLike: isSafeToLike,
       nudge: nudge,
       pendingWaits: function () { return timers.size; },
-      consecutiveAlreadyLiked: function () { return consecutiveAlready; }
+      consecutiveAlreadyLiked: function () { return consecutiveAlready; },
+      pruneNow: function () { return pruneOldCards(detectScrollContainer()); }
     };
   }
 

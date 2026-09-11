@@ -158,8 +158,24 @@ function render(status) {
   renderKeepAlive(status && status.keepAlive, running || paused);
 
   const reason = status && status.lastResult && status.lastResult.reason;
-  if (state === 'STOPPED' && reason === 'CAUGHT_UP') {
-    notice('Caught up — everything below was already liked, so the run stopped instead of re-walking the whole feed.');
+  if (state === 'STOPPED' && reason) notice(explainStop(reason, stats));
+}
+
+/** Say plainly why the last run ended, so a surprising stop is not a mystery. */
+function explainStop(reason, stats) {
+  switch (reason) {
+    case 'CAUGHT_UP':
+      return 'Caught up — a long run of already-liked posts means everything below is older, so it stopped instead of re-walking the feed.';
+    case 'MAX_LIKES_REACHED':
+      return `Reached the maximum of ${stats.newLikes || 0} new likes for this run. Raise "Maximum new likes" to go further.`;
+    case 'END_OF_FEED':
+      return 'Reached the end of the feed — no new posts loaded after several attempts. If you think there is more below, raise "Scroll delay" and "Stop after no new posts".';
+    case 'STOPPED_BY_USER':
+      return 'Stopped by you.';
+    case 'ERROR':
+      return 'The run hit an error and stopped. Open the page console (F12) for the details.';
+    default:
+      return `Last run ended: ${reason}`;
   }
 }
 

@@ -4,10 +4,10 @@
 const NUMBER_FIELDS = [
   'scrollAmount', 'scrollDelay', 'maxNoNewContentAttempts',
   'clickDelay', 'verifyTimeout', 'maxLikesPerRun', 'historyFailureLimit',
-  'stopAfterConsecutiveAlreadyLiked'
+  'stopAfterConsecutiveAlreadyLiked', 'pruneWhenCardsExceed', 'keepRecentCards'
 ];
 const NULLABLE_FIELDS = ['minClickDelay', 'maxClickDelay'];
-const BOOL_FIELDS = ['showBadge', 'debug', 'fastForward', 'keepAwakeInBackground'];
+const BOOL_FIELDS = ['showBadge', 'debug', 'fastForward', 'keepAwakeInBackground', 'pruneProcessedCards'];
 
 const $ = (id) => document.getElementById(id);
 let defaults = {};
@@ -32,6 +32,7 @@ async function load() {
   $('showBadge').checked = s.showBadge !== false;
   $('fastForward').checked = s.fastForward !== false;
   $('keepAwakeInBackground').checked = s.keepAwakeInBackground !== false;
+  $('pruneProcessedCards').checked = s.pruneProcessedCards !== false;
   showHistoryCount(history);
 }
 
