@@ -127,6 +127,9 @@
         // the next page's copy picks the run back up from storage.
         location.href = url;
       },
+      countUnliked: function () {
+        return document.querySelectorAll(RAL.SELECTORS.UNLIKED).length;
+      },
       runEngine: function (pageSettings) {
         var eng = ensureEngine(Object.assign({}, settings, pageSettings));
         eng.updateSettings(pageSettings);
@@ -289,6 +292,15 @@
             // Real pagination beats infinite scrolling: small fresh pages, and
             // progress that survives a reload.
             ensurePageRunner(settings).start(settings);
+          } else {
+            eng.start(settings);
+          }
+          syncKeepAlive(eng.getState());
+          break;
+
+        case 'FIND_START':
+          if (PAGES && PAGES.parsePageInfo(document, window).paginated) {
+            ensurePageRunner(settings).findStart(settings);
           } else {
             eng.start(settings);
           }

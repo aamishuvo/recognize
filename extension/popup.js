@@ -25,6 +25,7 @@ async function init() {
   $('pause').addEventListener('click', () => command($('pause').dataset.mode === 'resume' ? 'RESUME' : 'PAUSE'));
   $('stop').addEventListener('click', () => command('STOP'));
   $('diagnose').addEventListener('click', runDiagnose);
+  $('find-start').addEventListener('click', () => command('FIND_START'));
   $('resume').addEventListener('click', async () => {
     const page = parseInt($('resume').dataset.page, 10);
     if (Number.isFinite(page)) {
@@ -198,9 +199,15 @@ function renderPageProgress(status) {
   }
   row.hidden = false;
   const where = info.last ? `${info.current} of ${info.last}` : `${info.current}`;
-  $('page-info').textContent = run && run.active
-    ? `${where} · ${run.totals.newLikes} liked over ${run.pagesDone} page(s)`
-    : where;
+  if (run && run.active && run.mode === 'seek' && run.seek) {
+    // The search is a handful of page loads; show it narrowing.
+    $('page-info').textContent =
+      `searching ${run.seek.lo}–${run.seek.hi} (step ${run.seek.steps})`;
+  } else {
+    $('page-info').textContent = run && run.active
+      ? `${where} · ${run.totals.newLikes} liked over ${run.pagesDone} page(s)`
+      : where;
+  }
 
   const resumeAt = run && !run.active ? run.resumeAt : null;
   if (resumeAt && resumeAt !== info.current) {
@@ -213,7 +220,8 @@ function renderPageProgress(status) {
 }
 
 function explainPageStop(run, info) {
-  const done = `${run.pagesDone || 0} page(s), ${run.totals ? run.totals.newLikes : 0} new like(s).`;
+  const done = `${run.pagesDone || 0} page(s), ${run.totals ? run.totals.newLikes : 0} new like(s).` +
+    (run.foundStartPage ? ` Started at page ${run.foundStartPage}.` : '');
   switch (run.lastReason) {
     case 'NO_PAGINATION':
       return `Stopped: that page had no pagination, so there was nowhere to go next. Open the grid view that shows page links at the bottom, then start again. (${done})`;

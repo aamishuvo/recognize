@@ -142,9 +142,12 @@
     var onUpdate = deps.onUpdate || function () {};
     var log = deps.log || function () {};
 
+    var MAX_SEEK_STEPS = 25;   // log2(1792) is ~11; this is a safety net, not a budget
+
     function blankState(settings) {
       return {
         active: true,
+        mode: 'run',
         startedAt: Date.now(),
         page: parsePageInfo(doc(), win()).current,
         pagesDone: 0,
@@ -185,10 +188,96 @@
       });
     }
 
+    /**
+     * Find where the last run left off, without walking there.
+     *
+     * The feed is newest-first and the pages already worked through form a
+     * block at the front, so the first page still holding something unliked can
+     * be found by halving the range instead of visiting every page. About
+     * eleven page loads for a feed of 1792 pages, rather than seventy-two.
+     *
+     * It is a starting point, not a guarantee: if an old post somewhere deep in
+     * the history was never liked while newer ones were, the search can land
+     * later than that post. The run then goes forward from wherever it lands,
+     * and a lower "start from page" can always be set by hand.
+     */
+    function findStart(settings) {
+      var info = parsePageInfo(doc(), win());
+      if (!info.paginated || !info.last || info.last < 2) {
+        log('No page range to search - starting here instead');
+        return start(settings);
+      }
+      var state = blankState(settings);
+      state.mode = 'seek';
+      state.seek = { lo: 1, hi: info.last, probe: null, steps: 0 };
+      log('Searching pages 1-' + info.last + ' for the first one with anything unliked');
+      return stepSeek(state);
+    }
+
+    function stepSeek(state) {
+      var seek = state.seek;
+
+      if (seek.steps >= MAX_SEEK_STEPS) {
+        log('Search took too many steps - starting at page ' + seek.lo);
+        return beginRunAt(state, seek.lo);
+      }
+      if (seek.lo >= seek.hi) {
+        log('First page with anything unliked: ' + seek.lo);
+        state.foundStartPage = seek.lo;
+        return beginRunAt(state, seek.lo);
+      }
+
+      seek.probe = Math.floor((seek.lo + seek.hi) / 2);
+      seek.steps++;
+      return storage.set(state).then(function () {
+        onUpdate(state);
+        navigate(urlForPage(win().location.href, seek.probe));
+        return { navigating: true, state: state };
+      });
+    }
+
+    /** Switch out of searching and start the real run at `page`. */
+    function beginRunAt(state, page) {
+      state.mode = 'run';
+      state.page = page;
+      state.resumeAt = page;
+      return storage.set(state).then(function () {
+        onUpdate(state);
+        var here = parsePageInfo(doc(), win()).current;
+        if (here !== page) {
+          navigate(urlForPage(win().location.href, page));
+          return { navigating: true, state: state };
+        }
+        return workThisPage(state);
+      });
+    }
+
+    /** One probe of the search: did this page have anything left to like? */
+    function continueSeek(state) {
+      var unliked = 0;
+      try { unliked = deps.countUnliked ? deps.countUnliked() : 0; } catch (e) { unliked = 0; }
+      var seek = state.seek;
+      var at = parsePageInfo(doc(), win()).current;
+
+      if (unliked > 0) {
+        seek.hi = at;               // something here: the answer is at or before it
+        log('Page ' + at + ' still has ' + unliked + ' unliked - searching earlier');
+      } else {
+        seek.lo = at + 1;           // nothing here: the answer is after it
+        log('Page ' + at + ' is fully liked - searching later');
+      }
+      return stepSeek(state);
+    }
+
     /** Called on every page load: continue a run that is already in progress. */
     function resume() {
       return storage.get().then(function (state) {
         if (!state || !state.active) return null;
+
+        if (state.mode === 'seek' && state.seek) {
+          onUpdate(state);
+          return continueSeek(state);
+        }
 
         var here = parsePageInfo(doc(), win()).current;
         if (state.page !== here) {
@@ -295,7 +384,13 @@
       });
     }
 
-    return { start: start, resume: resume, stop: stop, STATE_KEY: STATE_KEY };
+    return {
+      start: start,
+      findStart: findStart,
+      resume: resume,
+      stop: stop,
+      STATE_KEY: STATE_KEY
+    };
   }
 
   global.RecognizePagination = {

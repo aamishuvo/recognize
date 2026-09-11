@@ -889,6 +889,118 @@
     assert(h.store.value.pagesDone <= 2, 'after the final page or two');
   });
 
+  /**
+   * Harness for the "find where I left off" search. `firstUnlikedPage` is the
+   * truth we expect it to discover.
+   */
+  function seekHarness(lastPage, firstUnlikedPage) {
+    var page = 1;
+    var store = { value: null };
+    var navigations = [];
+    var probes = [];
+    var f;
+
+    function buildFor(p) {
+      f = paginationFixture(p, { pages: [2, 3, lastPage], next: p < lastPage ? p + 1 : null });
+    }
+    buildFor(page);
+
+    var runner = PAGES.createPageRunner({
+      get doc() { return f.doc; },
+      get win() { return f.win; },
+      storage: {
+        get: function () { return Promise.resolve(store.value); },
+        set: function (v) { store.value = JSON.parse(JSON.stringify(v)); return Promise.resolve(); }
+      },
+      navigate: function (url) {
+        navigations.push(url);
+        page = PAGES.pageOf(url);
+        buildFor(page);
+      },
+      countUnliked: function () {
+        probes.push(page);
+        return page >= firstUnlikedPage ? 7 : 0;   // the feed's real shape
+      },
+      runEngine: function () {
+        return Promise.resolve({
+          reason: 'PAGE_DONE',
+          stats: { newLikes: 1, alreadyLiked: 13, skipped: 0, errors: 0, scanned: 14 }
+        });
+      }
+    });
+
+    return {
+      runner: runner, store: store, navigations: navigations, probes: probes,
+      currentPage: function () { return page; },
+      settle: async function (max) {
+        for (var i = 0; i < (max || 40); i++) {
+          if (store.value && store.value.mode === 'run') break;
+          await runner.resume();
+        }
+      }
+    };
+  }
+
+  test('39b. Finds where the last run left off without walking there', async function () {
+    var h = seekHarness(1792, 73);
+    await h.runner.findStart({ maxLikesPerRun: 10, stopAfterEmptyPages: 5 });
+    await h.settle();
+
+    eq(h.store.value.foundStartPage, 73, 'it found the first page with anything unliked');
+    assert(h.probes.length <= 13,
+      'it got there in about log2(1792) probes, not 72 (' + h.probes.length + ')');
+    assert(h.probes.length >= 8, 'and it really did search rather than guessing (' + h.probes.length + ')');
+  });
+
+  test('39c. The search is correct across the whole range', async function () {
+    // Every interesting shape: the very first page, the very last, and the ends.
+    for (const target of [1, 2, 37, 500, 1791, 1792]) {
+      var h = seekHarness(1792, target);
+      await h.runner.findStart({ maxLikesPerRun: 5, stopAfterEmptyPages: 5 });
+      await h.settle();
+      eq(h.store.value.foundStartPage, target, 'found page ' + target);
+    }
+  });
+
+  test('39d. A fully liked feed lands on the last page rather than looping', async function () {
+    var h = seekHarness(1792, 99999);      // nothing unliked anywhere
+    await h.runner.findStart({ maxLikesPerRun: 5, stopAfterEmptyPages: 5 });
+    await h.settle();
+    eq(h.store.value.mode, 'run', 'the search terminated');
+    eq(h.store.value.page, 1792, 'and settled on the last page');
+    assert(h.probes.length <= 13, 'without thrashing (' + h.probes.length + ' probes)');
+  });
+
+  test('39e. With no page range to search it just starts here', async function () {
+    var holder = document.createElement('div');
+    stage.appendChild(holder);
+    holder.innerHTML = '<div id="no-pagination"></div>';      // no pagination at all
+    var fakeWin = { location: { href: REAL_URL } };
+    var fakeDoc = {
+      querySelector: function (sel) { return holder.querySelector(sel); },
+      querySelectorAll: function (sel) { return holder.querySelectorAll(sel); },
+      location: { href: REAL_URL }
+    };
+    var store = { value: null };
+    var ran = 0;
+    var runner = PAGES.createPageRunner({
+      doc: fakeDoc, win: fakeWin,
+      storage: {
+        get: function () { return Promise.resolve(store.value); },
+        set: function (v) { store.value = v; return Promise.resolve(); }
+      },
+      navigate: function () { throw new Error('must not navigate with no pagination'); },
+      countUnliked: function () { return 0; },
+      runEngine: function () {
+        ran++;
+        return Promise.resolve({ reason: 'PAGE_DONE', stats: { newLikes: 0, alreadyLiked: 0, scanned: 0 } });
+      }
+    });
+    await runner.findStart({ maxLikesPerRun: 5, stopAfterEmptyPages: 5 });
+    eq(ran, 1, 'it fell back to working the page it is on');
+    eq(store.value.mode, 'run', 'and is not left stuck in search mode');
+  });
+
   test('40. STOP ends a paginated run and it does not resume', async function () {
     var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 1; } });
     await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
