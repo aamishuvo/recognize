@@ -392,8 +392,18 @@
       state.active = false;
       state.lastReason = reason;
       state.lastPageReached = parsePageInfo(doc(), win()).current;
-      // Where a fresh run should pick up next time.
-      state.resumeAt = reason === 'END_OF_FEED' ? state.lastPageReached : state.lastPageReached;
+
+      if (reason === 'END_OF_FEED') {
+        // The backlog is done. From here on the only unliked posts are the NEW
+        // ones, and new posts arrive at the FRONT of a newest-first feed - so
+        // the next run belongs at page 1, not at the last page we happened to
+        // stop on. Leaving resumeAt at the end would send every future run to
+        // the oldest corner of the feed, where there is nothing left to do.
+        state.backlogComplete = true;
+        state.resumeAt = 1;
+      } else {
+        state.resumeAt = state.lastPageReached;
+      }
       return storage.set(state).then(function () {
         log('Paginated run finished (' + reason + ') after ' + state.pagesDone +
             ' page(s): ' + state.totals.newLikes + ' new like(s)');

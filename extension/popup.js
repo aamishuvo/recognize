@@ -219,9 +219,11 @@ function renderPageProgress(status) {
   if (resumeAt) {
     resumeBtn.hidden = false;
     resumeBtn.dataset.page = resumeAt;
-    resumeBtn.textContent = run.active && resumeAt === info.current
-      ? `Restart from page ${resumeAt}`
-      : `Resume from page ${resumeAt}`;
+    resumeBtn.textContent = run.backlogComplete
+      ? 'Start from page 1 (catch up on new posts)'
+      : (run.active && resumeAt === info.current
+        ? `Restart from page ${resumeAt}`
+        : `Resume from page ${resumeAt}`);
     resumeBtn.title = `Furthest page reached: ${run.furthestPage || resumeAt}`;
   } else {
     resumeBtn.hidden = true;
@@ -235,7 +237,8 @@ function explainPageStop(run, info) {
     case 'NO_PAGINATION':
       return `Stopped: that page had no pagination, so there was nowhere to go next. Open the grid view that shows page links at the bottom, then start again. (${done})`;
     case 'END_OF_FEED':
-      return `Reached the last page${info && info.last ? ` (${info.last})` : ''}. ${done}`;
+      return `Backlog finished — reached the last page${info && info.last ? ` (${info.last})` : ''}. ${done} ` +
+        `From now on just press START on page 1: new posts arrive at the top, and it stops after a few pages with nothing new.`;
     case 'CAUGHT_UP':
       return `Caught up — several pages in a row had nothing new. ${done}`;
     case 'MAX_LIKES_REACHED':

@@ -1001,6 +1001,32 @@
     eq(store.value.mode, 'run', 'and is not left stuck in search mode');
   });
 
+  test('39f. Finishing the backlog sends the next run to page 1, not the last page', async function () {
+    // New posts arrive at the FRONT of a newest-first feed. Once the backlog is
+    // done, pointing future runs at the last page would aim them at the oldest
+    // corner, where there is nothing left to do, forever.
+    var h = runnerHarness({ startPage: 1791, lastPage: 1792, likesPerPage: function () { return 1; } });
+    await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'END_OF_FEED', 'it reached the end of the feed');
+    eq(h.store.value.backlogComplete, true, 'the backlog is marked complete');
+    eq(h.store.value.resumeAt, 1, 'the next run is aimed at page 1, where new posts appear');
+    assert(h.store.value.lastPageReached >= 1791,
+      'while still recording how far it actually got (' + h.store.value.lastPageReached + ')');
+  });
+
+  test('39g. Stopping mid-backlog still resumes where it stopped', async function () {
+    var h = runnerHarness({ startPage: 300, likesPerPage: function () { return 4; } });
+    await h.runner.start({ maxLikesPerRun: 8, stopAfterEmptyPages: 5 });
+    await h.resumeUntilDone();
+
+    eq(h.store.value.lastReason, 'MAX_LIKES_REACHED', 'it stopped at the budget, not the end');
+    assert(!h.store.value.backlogComplete, 'the backlog is NOT marked complete');
+    assert(h.store.value.resumeAt >= 300,
+      'and it resumes where it stopped, not at page 1 (' + h.store.value.resumeAt + ')');
+  });
+
   test('40. STOP ends a paginated run and it does not resume', async function () {
     var h = runnerHarness({ startPage: 72, likesPerPage: function () { return 1; } });
     await h.runner.start({ maxLikesPerRun: 100, stopAfterEmptyPages: 5 });
